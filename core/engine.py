@@ -22,7 +22,6 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
-    # CRITICAL FIX: Added Gibberish Rejection Protocol
     sys_prompt = (
         "You are a strict financial data extraction AI. Extract ONLY the expenses explicitly mentioned in the user text into JSON with an 'items' array. "
         "CRITICAL RULES:\n"
@@ -41,7 +40,8 @@ async def parse_expense_text(text: str) -> list:
             model="llama-3.1-8b-instant",
             response_format={"type": "json_object"},
             temperature=0.0,
-            max_tokens=2500
+            # CRITICAL FIX: Expanded to 8000 tokens to ensure massive 100+ item lists are never truncated.
+            max_tokens=8000
         )
     except Exception as e:
         raise FinanceManagerException("AI Processing", f"Groq API Error: {str(e)}", "Wait 60 seconds and try again.")
