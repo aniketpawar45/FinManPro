@@ -50,3 +50,22 @@ BEGIN
   ORDER BY SUM(t.amount) DESC;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+ALTER TABLE transactions
+ALTER COLUMN transaction_date TYPE DATE
+USING transaction_date::DATE;
+
+-- 1. Add the new text columns
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'Other';
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS subcategory TEXT DEFAULT 'General';
+
+-- 2. Drop the old relational foreign key constraint
+ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_category_id_fkey;
+
+-- 3. Drop the old category_id column
+ALTER TABLE transactions DROP COLUMN IF EXISTS category_id;
+
+-- 4. Delete the obsolete categories table entirely
+DROP TABLE IF EXISTS categories CASCADE;
+
+ALTER TABLE transactions RENAME COLUMN description TO item_name;
