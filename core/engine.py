@@ -40,13 +40,30 @@ async def parse_expense_text(text: str) -> list:
             model="llama-3.1-8b-instant",
             response_format={"type": "json_object"},
             temperature=0.0,
-            # CRITICAL FIX: Expanded to 8000 tokens to ensure massive 100+ item lists are never truncated.
-            max_tokens=8000
+            max_tokens=4000
         )
     except Exception as e:
         raise FinanceManagerException("AI Processing", f"Groq API Error: {str(e)}", "Wait 60 seconds and try again.")
 
-    batch = ExpenseBatch.model_validate_json(res.choices[0].message.content)
+    # ================= ROLLBACK LAYER 1: TRUNCATION DETECTION =================
+    finish_reason = res.choices[0].finish_reason
+    if finish_reason == "length" or finish_reason == "max_tokens":
+        raise FinanceManagerException(
+            "AI Capacity Limit",
+            "The input list is too massive. The AI reached its token limit and truncated the data.",
+            "🛑 ROLLBACK INITIATED: Zero items were saved to prevent data corruption. Please split your list into two smaller messages."
+        )
+
+    # ================= ROLLBACK LAYER 2: CORRUPTION DETECTION =================
+    try:
+        batch = ExpenseBatch.model_validate_json(res.choices[0].message.content)
+    except Exception as e:
+        raise FinanceManagerException(
+            "AI Parsing Fault",
+            "The AI generated corrupted or incomplete JSON.",
+            "🛑 ROLLBACK INITIATED: Zero items were saved. Please check your text format and try again."
+        )
+
     results = []
 
     for ext in batch.items:
