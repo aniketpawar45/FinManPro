@@ -56,9 +56,10 @@ def check_duplicate(user_id: str, amount: float, description: str) -> bool:
         return False
 
 
+# [Keep your imports and other database functions identical]
+
 def save_transaction(record: TransactionRecord) -> bool:
     try:
-        # Resolve the string category name to a database ID
         cat_id = get_or_create_category(record.category_name)
 
         data = {
@@ -66,6 +67,7 @@ def save_transaction(record: TransactionRecord) -> bool:
             "amount": record.amount,
             "category_id": cat_id,
             "description": record.description.title(),
+            # .isoformat() on a Python date object natively outputs "YYYY-MM-DD"
             "transaction_date": record.transaction_date.isoformat(),
             "remarks": record.remarks
         }

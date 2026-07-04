@@ -18,7 +18,6 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
-    # AI Autonomy Prompt: Let the AI dynamically decide the category
     sys_prompt = (
         "Extract expenses into JSON with an 'items' array containing: "
         "amount (number), item_name (string), date_str (string, optional), category_name (string). "
@@ -41,11 +40,15 @@ async def parse_expense_text(text: str) -> list:
         item = ext.item_name.title() if ext.item_name else "Unknown Item"
         ai_cat = ext.category_name.title() if ext.category_name else "Other"
 
-        date = get_ist_now()
+        # Base date is strictly today's date in IST
+        item_date = get_ist_now().date()
+
         if ext.date_str:
             p_date = dateparser.parse(ext.date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
-            if p_date: date = IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date
+            if p_date:
+                # Localize and extract just the date component
+                item_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
 
-        results.append((amt, item, date, ai_cat))
+        results.append((amt, item, item_date, ai_cat))
 
     return results

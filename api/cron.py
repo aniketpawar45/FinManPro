@@ -39,12 +39,11 @@ async def process_scheduled_reports(authorization: str = Header(None)):
         writer.writerow(["Date", "Item Description", "Category", "Amount (INR)"])
 
         total = 0.0
+        # Update the loop inside process_scheduled_reports
         for item in data:
             total += float(item['amount'])
             cat = item['categories']['category_name'] if item.get('categories') else "Other"
-            writer.writerow(
-                [datetime.fromisoformat(item['transaction_date']).strftime("%Y-%m-%d %H:%M"), item['description'], cat,
-                 item['amount']])
+            writer.writerow([item['transaction_date'], item['description'], cat, item['amount']])
 
         mem_file.seek(0)
         csv_bytes = mem_file.getvalue().encode('utf-8')

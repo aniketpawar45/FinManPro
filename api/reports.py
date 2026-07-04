@@ -37,11 +37,11 @@ async def handle_csv_export(bot: Bot, chat_id: int, uid: str, start_ts: float, e
     writer = csv.writer(mem_file)
     writer.writerow(["Date", "Item Description", "Category", "Amount (INR)"])
 
+    # Update the loop inside handle_csv_export
     for item in data:
         cat = item['categories']['category_name'] if item.get('categories') else "Other"
-        writer.writerow(
-            [datetime.fromisoformat(item['transaction_date']).strftime("%Y-%m-%d %H:%M"), item['description'], cat,
-             item['amount']])
+        # Since it's already returned as "YYYY-MM-DD" from Supabase, we can print it directly
+        writer.writerow([item['transaction_date'], item['description'], cat, item['amount']])
 
     mem_file.seek(0)
     byte_stream = io.BytesIO(mem_file.getvalue().encode('utf-8'))

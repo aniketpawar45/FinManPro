@@ -26,11 +26,24 @@ def parse_date_range(query: str) -> tuple:
     return start, end, start.strftime('%d %b %Y')
 
 
+# [Keep parse_date_range identical]
+
 def get_report_data(user_id: str, start: datetime.datetime, end: datetime.datetime) -> list:
-    res = supabase.table("transactions").select("amount, description, transaction_date, categories(category_name)").eq(
-        "user_id", user_id).gte("transaction_date", start.isoformat()).lte("transaction_date", end.isoformat()).order(
-        "transaction_date", desc=True).execute()
+    # Convert datetime boundary parameters into strict ISO date strings
+    start_date = start.date().isoformat()
+    end_date = end.date().isoformat()
+
+    res = supabase.table("transactions") \
+        .select("amount, description, transaction_date, categories(category_name)") \
+        .eq("user_id", user_id) \
+        .gte("transaction_date", start_date) \
+        .lte("transaction_date", end_date) \
+        .order("transaction_date", desc=True) \
+        .execute()
     return res.data
+
+
+# [Keep get_statistics_data identical]
 
 
 def get_statistics_data(user_id: str, start: datetime.datetime, end: datetime.datetime):

@@ -33,12 +33,34 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
             chat_id, uid, msg_id, data = q["message"]["chat"]["id"], str(q["from"]["id"]), q["message"]["message_id"], \
             q["data"]
 
+            # Inside your handle_webhook function, update the callback query parsing section:
+
             if data.startswith("csv:"):
                 _, start_ts, end_ts = data.split(":")
                 await handle_csv_export(bot, chat_id, uid, float(start_ts), float(end_ts))
 
             elif data == "cancel":
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="🚫 Entry cancelled.")
+
+            # Update any interactive buttons to parse dates strictly
+            elif data.startswith("cat:"):
+                parts = data.split(":")
+                cat_id, amt, desc, d_ts = int(parts[1]), float(parts[2]), parts[3], float(parts[4])
+
+                # Truncate to pure date
+                item_date = datetime.fromtimestamp(d_ts, tz=IST_TZ).date()
+
+                # We need to map cat_id to string name since models.py was updated
+                from core.database import supabase
+                res = supabase.table("categories").select("category_name").eq("id", cat_id).execute()
+                cat_name = res.data[0]['category_name'] if res.data else "Other"
+
+                save_transaction(TransactionRecord(
+                    user_id=uid, amount=amt, category_name=cat_name, description=desc, transaction_date=item_date
+                ))
+
+                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
+                                            text=f"✅ Saved: {desc} - ₹{amt} ({cat_name})")
 
         # Handle Standard Messages
         elif "message" in update:
