@@ -9,7 +9,18 @@ from core.utils import get_ist_now, FinanceManagerException, IST_TZ
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-
+async def transcribe_audio(audio_bytes: bytes) -> str:
+    """Helper to transcribe audio using Whisper."""
+    if not client:
+        raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
+    try:
+        res = await client.audio.transcriptions.create(
+            file=("voice.ogg", audio_bytes, "audio/ogg"),
+            model="whisper-large-v3"
+        )
+        return res.text.strip()
+    except Exception as e:
+        raise FinanceManagerException("Voice AI", f"Transcription Failed: {str(e)}", "Please type your entry instead.")
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
