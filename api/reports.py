@@ -17,8 +17,7 @@ async def handle_report_command(bot: Bot, chat_id: int, command: str, uid: str):
     msg = f"📄 *Financial Report: {label}*\n\n`{'Item':<13} | {'Amt':<6} | {'Cat'}`\n" + "-" * 30 + "\n"
 
     for item in data:
-        amt, desc, cat = float(item['amount']), item['description'][:13], item['categories'][
-            'category_name'] if item.get('categories') else "Other"
+        amt, desc, cat = float(item['amount']), item['description'][:13], item.get('category', 'Other')
         msg += f"`{desc:<13} | {amt:<6.0f} |` {'🚨' if amt > (total * 0.3) else '  '} {cat}\n"
 
     msg += "-" * 30 + f"\n💰 *Total Spent: ₹{total:,.2f}*\n\n"
@@ -35,13 +34,12 @@ async def handle_csv_export(bot: Bot, chat_id: int, uid: str, start_ts: float, e
 
     mem_file = io.StringIO()
     writer = csv.writer(mem_file)
-    writer.writerow(["Date", "Item Description", "Category", "Amount (INR)"])
+    writer.writerow(["Date", "Item Description", "Category", "Subcategory", "Amount (INR)"])
 
-    # Update the loop inside handle_csv_export
     for item in data:
-        cat = item['categories']['category_name'] if item.get('categories') else "Other"
-        # Since it's already returned as "YYYY-MM-DD" from Supabase, we can print it directly
-        writer.writerow([item['transaction_date'], item['description'], cat, item['amount']])
+        cat = item.get('category', 'Other')
+        subcat = item.get('subcategory', 'General')
+        writer.writerow([item['transaction_date'], item['description'], cat, subcat, item['amount']])
 
     mem_file.seek(0)
     byte_stream = io.BytesIO(mem_file.getvalue().encode('utf-8'))

@@ -1,12 +1,13 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from datetime import datetime, date
+from datetime import date
 
 class ExpenseExtraction(BaseModel):
     amount: float = Field(default=0.0)
     item_name: str = Field(default="")
     date_str: Optional[str] = Field(default=None)
-    category_name: str = Field(default="Other")
+    category: str = Field(default="Other")
+    subcategory: str = Field(default="General")
 
 class ExpenseBatch(BaseModel):
     items: List[ExpenseExtraction] = Field(default_factory=list)
@@ -14,7 +15,8 @@ class ExpenseBatch(BaseModel):
 class TransactionRecord(BaseModel):
     user_id: str
     amount: float
-    category_name: str
+    category: str
+    subcategory: str
     description: str
-    transaction_date: date  # Enforces strict date format without time properties
+    transaction_date: date
     remarks: str = ""

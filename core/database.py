@@ -12,51 +12,42 @@ SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL else None
 
-def get_or_create_category(category_name: str) -> int:
-    cat_name = category_name.title().strip()
-    if not cat_name: cat_name = "Other"
-    try:
-        res = supabase.table("categories").select("id").eq("category_name", cat_name).execute()
-        if res.data: return res.data[0]['id']
-        new_res = supabase.table("categories").insert({"category_name": cat_name}).execute()
-        return new_res.data[0]['id']
-    except Exception as e:
-        logger.error(f"Failed to resolve category {cat_name}: {str(e)}")
-        return 1
 
-def get_last_category(description: str) -> str | None:
+def get_last_category(description: str):
+    """Fetches the last used High-Level Category and Subcategory for a specific item."""
     try:
-        res = supabase.table("transactions").select("categories(category_name)").eq("description", description.title()).order("created_at", desc=True).limit(1).execute()
-        if res.data and res.data[0].get('categories'): return res.data[0]['categories']['category_name']
-        return None
+        res = supabase.table("transactions").select("category, subcategory").eq("description",
+                                                                                description.title()).order("created_at",
+                                                                                                           desc=True).limit(
+            1).execute()
+        if res.data: return res.data[0].get('category', 'Other'), res.data[0].get('subcategory', 'General')
+        return None, None
     except:
-        return None
+        return None, None
+
 
 def check_duplicate(user_id: str, amount: float, description: str, transaction_date: date) -> bool:
-    """
-    CRITICAL FIX: Checks if a transaction with the EXACT SAME amount, description,
-    AND parsed transaction_date was inserted within the last 10 seconds.
-    """
     try:
         ten_sec_ago = (get_ist_now() - timedelta(seconds=10)).isoformat()
-        res = supabase.table("transactions").select("id")\
-            .eq("user_id", user_id)\
-            .eq("amount", amount)\
-            .eq("description", description.title())\
-            .eq("transaction_date", transaction_date.isoformat())\
-            .gt("created_at", ten_sec_ago)\
+        res = supabase.table("transactions").select("id") \
+            .eq("user_id", user_id) \
+            .eq("amount", amount) \
+            .eq("description", description.title()) \
+            .eq("transaction_date", transaction_date.isoformat()) \
+            .gt("created_at", ten_sec_ago) \
             .execute()
         return len(res.data) > 0
     except:
         return False
 
+
 def save_transaction(record: TransactionRecord) -> bool:
     try:
-        cat_id = get_or_create_category(record.category_name)
         data = {
             "user_id": record.user_id,
             "amount": record.amount,
-            "category_id": cat_id,
+            "category": record.category,
+            "subcategory": record.subcategory,
             "description": record.description.title(),
             "transaction_date": record.transaction_date.isoformat(),
             "remarks": record.remarks
@@ -66,14 +57,24 @@ def save_transaction(record: TransactionRecord) -> bool:
     except Exception as e:
         raise FinanceManagerException("Database", f"Commit failed: {str(e)}", "Check Supabase.")
 
+
 def get_user_stats(user_id: str) -> str:
+    # Optimized to group by the new text column natively
     try:
-        res = supabase.rpc("get_user_statistics", {"p_user_id": user_id}).execute()
-        data = res.data
-        if not data: return "No expenses logged."
-        total = sum(float(row['total_spent']) for row in data)
+        res = supabase.table("transactions").select("category, amount").eq("user_id", user_id).execute()
+        if not res.data: return "No expenses logged."
+
+        cat_map = {}
+        total = 0.0
+        for row in res.data:
+            c = row.get('category', 'Other')
+            a = float(row.get('amount', 0))
+            cat_map[c] = cat_map.get(c, 0) + a
+            total += a
+
         msg = f"💰 **Total Spent: ₹{total:,.2f}**\n\n**Breakdown:**\n"
-        for row in data: msg += f"{row.get('category_name', 'Other')}: ₹{float(row.get('total_spent', 0)):,.2f}\n"
+        for c, a in sorted(cat_map.items(), key=lambda x: x[1], reverse=True):
+            msg += f"{c}: ₹{a:,.2f}\n"
         return msg
     except:
         return "Failed to fetch stats."

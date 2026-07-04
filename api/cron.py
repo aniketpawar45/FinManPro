@@ -2,7 +2,6 @@ import os
 import io
 import csv
 from fastapi import APIRouter, Header, HTTPException
-from datetime import datetime
 from core.database import supabase
 from core.utils import get_ist_now
 from core.analytics import get_report_data, parse_date_range
@@ -36,14 +35,14 @@ async def process_scheduled_reports(authorization: str = Header(None)):
 
         mem_file = io.StringIO()
         writer = csv.writer(mem_file)
-        writer.writerow(["Date", "Item Description", "Category", "Amount (INR)"])
+        writer.writerow(["Date", "Item Description", "Category", "Subcategory", "Amount (INR)"])
 
         total = 0.0
-        # Update the loop inside process_scheduled_reports
         for item in data:
             total += float(item['amount'])
-            cat = item['categories']['category_name'] if item.get('categories') else "Other"
-            writer.writerow([item['transaction_date'], item['description'], cat, item['amount']])
+            cat = item.get('category', 'Other')
+            subcat = item.get('subcategory', 'General')
+            writer.writerow([item['transaction_date'], item['description'], cat, subcat, item['amount']])
 
         mem_file.seek(0)
         csv_bytes = mem_file.getvalue().encode('utf-8')

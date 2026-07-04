@@ -1,7 +1,6 @@
 import datetime
 import calendar
 import dateparser
-import re
 from core.database import supabase
 from core.utils import get_ist_now, IST_TZ
 
@@ -26,15 +25,13 @@ def parse_date_range(query: str) -> tuple:
     return start, end, start.strftime('%d %b %Y')
 
 
-# [Keep parse_date_range identical]
-
 def get_report_data(user_id: str, start: datetime.datetime, end: datetime.datetime) -> list:
-    # Convert datetime boundary parameters into strict ISO date strings
     start_date = start.date().isoformat()
     end_date = end.date().isoformat()
 
+    # Selects the new text columns directly instead of JOINing tables
     res = supabase.table("transactions") \
-        .select("amount, description, transaction_date, categories(category_name)") \
+        .select("amount, description, transaction_date, category, subcategory") \
         .eq("user_id", user_id) \
         .gte("transaction_date", start_date) \
         .lte("transaction_date", end_date) \
@@ -43,17 +40,16 @@ def get_report_data(user_id: str, start: datetime.datetime, end: datetime.dateti
     return res.data
 
 
-# [Keep get_statistics_data identical]
-
-
 def get_statistics_data(user_id: str, start: datetime.datetime, end: datetime.datetime):
     data = get_report_data(user_id, start, end)
     if not data: return None
+
     cat_map = {}
     total = 0
     for item in data:
         amt = float(item['amount'])
-        cat = item['categories']['category_name'] if item.get('categories') else "Other"
+        cat = item.get('category', 'Other')
         cat_map[cat] = cat_map.get(cat, 0) + amt
         total += amt
+
     return {"total": total, "categories": cat_map}

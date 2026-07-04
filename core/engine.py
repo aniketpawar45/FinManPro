@@ -18,23 +18,21 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
-    # CRITICAL FIX: "Few-Shot Prompting". We train the AI instantly by providing perfect examples.
-    # This guarantees human-like speed and eliminates all guesswork and regressions.
+    # ADVANCED FEW-SHOT: Forces High-Level Categories, specific Subcategories, and Bulk List Processing
     sys_prompt = (
         "You are an elite, lightning-fast financial extraction AI. Extract expenses into JSON with an 'items' array containing: "
-        "amount (number), item_name (string), date_str (string, optional), category_name (string). "
+        "amount (number), item_name (string), date_str (string, optional), category (string), subcategory (string). "
         "RULES:\n"
-        "1. Extract the exact item/service name. If ONLY a number is provided, leave item_name blank.\n"
-        "2. Dynamically assign a logical 1-2 word category.\n"
+        "1. Extract exact item name. If ONLY a number is provided without a name, leave item_name blank.\n"
+        "2. 'category' MUST be a high-level bucket (e.g., Food, Transport, Utilities, Shopping, Health, Housing, Entertainment, Other).\n"
+        "3. 'subcategory' is a specific 1-2 word description (e.g., Groceries, Cab, Electricity, Movie).\n"
         "EXAMPLES:\n"
-        "User: 'Milk 40'\n"
-        "Output: {\"items\": [{\"amount\": 40, \"item_name\": \"Milk\", \"category_name\": \"Groceries\"}]}\n"
-        "User: 'Cab 500'\n"
-        "Output: {\"items\": [{\"amount\": 500, \"item_name\": \"Cab\", \"category_name\": \"Transport\"}]}\n"
-        "User: '1500'\n"
-        "Output: {\"items\": [{\"amount\": 1500, \"item_name\": \"\", \"category_name\": \"\"}]}\n"
-        "User: 'Electricity bill 1200'\n"
-        "Output: {\"items\": [{\"amount\": 1200, \"item_name\": \"Electricity Bill\", \"category_name\": \"Utilities\"}]}"
+        "User: 'Milk 40, Cab 500, 1500'\n"
+        "Output: {\"items\": [\n"
+        "  {\"amount\": 40, \"item_name\": \"Milk\", \"category\": \"Food\", \"subcategory\": \"Groceries\"},\n"
+        "  {\"amount\": 500, \"item_name\": \"Cab\", \"category\": \"Transport\", \"subcategory\": \"Taxi\"},\n"
+        "  {\"amount\": 1500, \"item_name\": \"\", \"category\": \"Other\", \"subcategory\": \"Unknown\"}\n"
+        "]}"
     )
 
     res = await client.chat.completions.create(
@@ -50,12 +48,12 @@ async def parse_expense_text(text: str) -> list:
     for ext in batch.items:
         amt = ext.amount if ext.amount else 0.0
 
-        # PYTHON FALLBACK: Safely catches blanks or hallucinations without breaking perfectly good inputs
         item = str(ext.item_name).title().strip() if ext.item_name else "Unknown Item"
         if item == str(amt) or item == str(int(amt)) or item == "" or item.lower() == "unknown item":
             item = "Unknown Item"
 
-        ai_cat = ext.category_name.title().strip() if ext.category_name else "Other"
+        cat = ext.category.title().strip() if ext.category else "Other"
+        subcat = ext.subcategory.title().strip() if ext.subcategory else "General"
 
         item_date = get_ist_now().date()
         if ext.date_str:
@@ -63,6 +61,6 @@ async def parse_expense_text(text: str) -> list:
             if p_date:
                 item_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
 
-        results.append((amt, item, item_date, ai_cat))
+        results.append((amt, item, item_date, cat, subcat))
 
     return results
