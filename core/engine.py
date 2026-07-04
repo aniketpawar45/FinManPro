@@ -1,7 +1,5 @@
 import os
-import re
 import dateparser
-from datetime import datetime
 from groq import AsyncGroq
 from core.models import ExpenseBatch
 from core.utils import get_ist_now, FinanceManagerException, IST_TZ
@@ -17,11 +15,16 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
     return res.text.strip()
 
 
-async def parse_expense_text(text: str, valid_categories: list) -> list:
+async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
-    cat_list = ", ".join(valid_categories)
-    sys_prompt = f"Extract expenses into JSON with 'items' array containing amount, item_name, date_str, category_name. Categories must be from: [{cat_list}]."
+    # AI Autonomy Prompt: Let the AI dynamically decide the category
+    sys_prompt = (
+        "Extract expenses into JSON with an 'items' array containing: "
+        "amount (number), item_name (string), date_str (string, optional), category_name (string). "
+        "For category_name, dynamically generate the most logical, concise 1-to-2 word category "
+        "(e.g., Electronics, Dining, Travel, Healthcare, Subscriptions). Be highly accurate."
+    )
 
     res = await client.chat.completions.create(
         messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
@@ -36,10 +39,13 @@ async def parse_expense_text(text: str, valid_categories: list) -> list:
     for ext in batch.items:
         amt = ext.amount if ext.amount else 0.0
         item = ext.item_name.title() if ext.item_name else "Unknown Item"
+        ai_cat = ext.category_name.title() if ext.category_name else "Other"
+
         date = get_ist_now()
         if ext.date_str:
             p_date = dateparser.parse(ext.date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
             if p_date: date = IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date
-        results.append((amt, item, date, ext.category_name))
+
+        results.append((amt, item, date, ai_cat))
 
     return results

@@ -4,8 +4,7 @@ from fastapi import APIRouter, Request, Header, HTTPException
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from datetime import datetime
 
-from core.database import save_transaction, get_all_categories, check_duplicate, get_user_stats, get_last_category, \
-    supabase
+from core.database import save_transaction, check_duplicate, get_user_stats, get_last_category, supabase
 from core.engine import parse_expense_text, transcribe_audio
 from core.models import TransactionRecord
 from core.utils import get_ist_now, FinanceManagerException, IST_TZ
@@ -28,6 +27,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
     update = await request.json()
 
     try:
+        # Handle Callbacks (Only for CSV export & cancellation now)
         if "callback_query" in update:
             q = update["callback_query"]
             chat_id, uid, msg_id, data = q["message"]["chat"]["id"], str(q["from"]["id"]), q["message"]["message_id"], \
@@ -37,18 +37,10 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                 _, start_ts, end_ts = data.split(":")
                 await handle_csv_export(bot, chat_id, uid, float(start_ts), float(end_ts))
 
-            elif data.startswith("cat:"):
-                parts = data.split(":")
-                cat_id, amt, desc, d_ts = int(parts[1]), float(parts[2]), parts[3], float(parts[4])
-                save_transaction(TransactionRecord(user_id=uid, amount=amt, category_id=cat_id, description=desc,
-                                                   transaction_date=datetime.fromtimestamp(d_ts, tz=IST_TZ)))
-                cat_name = next((c['category_name'] for c in get_all_categories() if c['id'] == cat_id), "Other")
-                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
-                                            text=f"✅ Saved: {desc} - ₹{amt} ({cat_name})")
-
             elif data == "cancel":
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="🚫 Entry cancelled.")
 
+        # Handle Standard Messages
         elif "message" in update:
             msg = update["message"]
             chat_id, uid = msg["chat"]["id"], str(msg["from"]["id"])
@@ -87,28 +79,28 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     await bot.send_message(chat_id, "Unknown command.")
                 else:
                     await bot.send_chat_action(chat_id=chat_id, action='typing')
-                    categories = get_all_categories()
-                    for amt, desc, date, ai_cat in await parse_expense_text(text,
-                                                                            [c['category_name'] for c in categories]):
+
+                    # Process via AI (No hardcoded categories passed)
+                    extracted_data = await parse_expense_text(text)
+
+                    for amt, desc, date, ai_cat in extracted_data:
                         if amt <= 0: continue
                         if check_duplicate(uid, amt, desc):
                             await bot.send_message(chat_id, f"🛡️ Duplicate prevented: {desc} - ₹{amt}")
                             continue
 
-                        cat_id = get_last_category(desc) or next(
-                            (c['id'] for c in categories if c['category_name'].lower() == ai_cat.lower()), None)
-                        if cat_id:
-                            save_transaction(
-                                TransactionRecord(user_id=uid, amount=amt, category_id=cat_id, description=desc,
-                                                  transaction_date=date))
-                            cat_name = next(c['category_name'] for c in categories if c['id'] == cat_id)
-                            await bot.send_message(chat_id, f"🤖 Auto-Saved: {desc} - ₹{amt} ({cat_name})")
-                        else:
-                            buttons = [[InlineKeyboardButton(c['category_name'],
-                                                             callback_data=f"cat:{c['id']}:{amt}:{desc[:10]}:{date.timestamp()}")]
-                                       for c in categories] + [[InlineKeyboardButton("Cancel", callback_data="cancel")]]
-                            await bot.send_message(chat_id, f"Select category for '{desc}' (₹{amt}):",
-                                                   reply_markup=InlineKeyboardMarkup(buttons))
+                        # Use memory if item exists, otherwise trust the AI's dynamic category
+                        final_category = get_last_category(desc) or ai_cat
+
+                        save_transaction(TransactionRecord(
+                            user_id=uid,
+                            amount=amt,
+                            category_name=final_category,
+                            description=desc,
+                            transaction_date=date
+                        ))
+
+                        await bot.send_message(chat_id, f"🤖 Auto-Saved: {desc} - ₹{amt} ({final_category})")
 
     except FinanceManagerException as e:
         if "chat_id" in locals(): await bot.send_message(chat_id, f"❌ **Error:** {e.message}")
