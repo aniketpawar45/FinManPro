@@ -26,19 +26,19 @@ async def parse_expense_text(text: str) -> list:
     current_date_str = get_ist_now().strftime("%B %d, %Y")
     current_year_str = get_ist_now().strftime("%Y")
 
-    # CRITICAL FIXES: Added Indian number formats, isolated the weekend flag, and expanded frequencies.
+    # CRITICAL FIXES: Enforced Indian Number Math (Lakhs) and clarified the Weekend rule trigger.
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
         "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method, frequency, end_date_str, adjust_weekends. "
         "CRITICAL RULES:\n"
         "1. ZERO HALLUCINATIONS: Do not invent items.\n"
-        "2. AMOUNT PARSING: '1.5l' or '1.5 lakh' = 150000. 'l' or 'lakh' = 100000. 'k' = 1000.\n"
+        "2. AMOUNT PARSING (INDIAN SYSTEM): 'l' or 'lakh' means 100,000. '1.5l' = 150000. '2.51l' = 251000. NEVER multiply by 1,000,000.\n"
         "3. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
         "4. PAYMENT_METHOD: Deduce if mentioned. Default to 'Cash/UPI'.\n"
         "5. RECURRING DATES: If recurring, output EXACTLY ONE item. Set 'frequency' strictly to: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', or 'yearly'. "
         f"Set 'date_str' to start date (default to Jan 1st of {current_year_str} if only a day is given).\n"
-        "6. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY for the specific individual item where the user requested it. Do NOT apply it globally to other items."
+        "6. ADJUST WEEKENDS: If the user explicitly mentions 'earlier business day' or 'holiday' for a specific item, set 'adjust_weekends' to true for THAT ITEM ONLY."
     )
 
     try:
@@ -63,7 +63,6 @@ async def parse_expense_text(text: str) -> list:
 
     results = []
 
-    # Helper for complex month math
     def add_months(curr_date, months_to_add):
         m = (curr_date.month + months_to_add - 1) % 12 + 1
         y = curr_date.year + ((curr_date.month + months_to_add - 1) // 12)
@@ -121,7 +120,6 @@ async def parse_expense_text(text: str) -> list:
 
             results.append((amt, item, actual_date, cat, subcat, remarks, t_type, p_method))
 
-            # ================= EXPANDED FREQUENCY ENGINE =================
             if freq == 'daily':
                 current_date += timedelta(days=1)
             elif freq == 'weekly':
