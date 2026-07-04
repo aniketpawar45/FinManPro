@@ -1,5 +1,6 @@
 import os
 import dateparser
+from datetime import timedelta
 from groq import AsyncGroq
 from core.models import ExpenseBatch
 from core.utils import get_ist_now, FinanceManagerException, IST_TZ
@@ -21,18 +22,16 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
-    # CRITICAL FIX: Added explicit Subcategory Inference engine and banned "Unknown"
     sys_prompt = (
         "You are a strict financial data extraction AI. Extract the financial entries into JSON with an 'items' array. "
-        "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method. "
+        "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method, frequency, end_date_str. "
         "CRITICAL RULES:\n"
         "1. ZERO HALLUCINATIONS: Do not invent items.\n"
         "2. GIBBERISH REJECTION: If text is random/invalid, return an EMPTY array: {\"items\": []}.\n"
         "3. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
-        "4. PAYMENT_METHOD: Deduce if mentioned (e.g., 'Credit Card', 'UPI', 'PhonePe', 'GPay', 'Cash'). Default to 'Cash/UPI'.\n"
-        "5. CATEGORY: MUST be a High-Level bucket (e.g., Food, Transport, Shopping, Income, Housing, Utilities, Health).\n"
-        "6. SUBCATEGORY INFERENCE: NEVER use 'Unknown'. You MUST logically deduce a 1-2 word subcategory from the context (e.g., 'shirt' -> 'Clothing', a person's name -> 'Personal Transfer', 'zomato' -> 'Dining').\n"
-        "7. 'item_name' is the pure name. 'remarks' contains the full original string."
+        "4. PAYMENT_METHOD: Deduce if mentioned (e.g., 'Credit Card', 'UPI', 'Cash'). Default to 'Cash/UPI'.\n"
+        "5. CATEGORY & SUBCATEGORY: High-Level bucket and logical 1-2 word deduction. NEVER use 'Unknown'.\n"
+        "6. RECURRING DATES (CRITICAL): If the user says 'everyday from [date1] to [date2]' or 'till date', output ONE single item, but set 'frequency' to 'daily', 'date_str' to the start date, and 'end_date_str' to the end date (use 'today' for till date)."
     )
 
     try:
@@ -63,22 +62,35 @@ async def parse_expense_text(text: str) -> list:
         if item in [str(amt), str(int(amt)), "", "Unknown Item"]: item = "Unknown Item"
 
         cat = ext.category.title().strip() if ext.category else "Misc"
-
-        # Fallback in case the AI still disobeys the ban on "Unknown"
         subcat = ext.subcategory.title().strip() if ext.subcategory else "General"
-        if subcat.lower() == "unknown":
-            subcat = "General"
-
+        if subcat.lower() == "unknown": subcat = "General"
         remarks = ext.remarks.strip() if ext.remarks else item
-
         t_type = ext.transaction_type.title().strip()
         p_method = ext.payment_method.title().strip()
 
-        item_date = get_ist_now().date()
+        # ================= TEMPORAL EXPANSION ENGINE =================
+        start_date = get_ist_now().date()
         if ext.date_str:
             p_date = dateparser.parse(ext.date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
-            if p_date: item_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
+            if p_date: start_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
 
-        results.append((amt, item, item_date, cat, subcat, remarks, t_type, p_method))
+        end_date = start_date
+        if ext.frequency and ext.frequency.lower() == 'daily' and ext.end_date_str:
+            p_end = dateparser.parse(ext.end_date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
+            if p_end: end_date = (IST_TZ.localize(p_end) if p_end.tzinfo is None else p_end).date()
+
+        if end_date < start_date:
+            end_date = start_date  # Failsafe against backwards time travel
+
+        current_date = start_date
+        loop_cap = 365  # Hard limit: Max 1 year of daily entries per command to prevent memory overflow
+        loops = 0
+
+        while current_date <= end_date and loops < loop_cap:
+            results.append((amt, item, current_date, cat, subcat, remarks, t_type, p_method))
+            current_date += timedelta(days=1)
+            loops += 1
+            if not (ext.frequency and ext.frequency.lower() == 'daily'):
+                break  # Break immediately if it's not a recurring 'daily' command
 
     return results

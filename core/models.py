@@ -2,18 +2,26 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import date
 
+
 class ExpenseExtraction(BaseModel):
     amount: float = Field(default=0.0)
     item_name: str = Field(default="")
     date_str: Optional[str] = Field(default=None)
+
+    # CRITICAL FIX: Added fields for temporal expansion (recurring dates)
+    end_date_str: Optional[str] = Field(default=None)
+    frequency: str = Field(default="none")
+
     category: str = Field(default="Misc")
     subcategory: str = Field(default="Unknown")
     remarks: str = Field(default="")
     transaction_type: str = Field(default="Expense")
     payment_method: str = Field(default="Cash/UPI")
 
+
 class ExpenseBatch(BaseModel):
     items: List[ExpenseExtraction] = Field(default_factory=list)
+
 
 class TransactionRecord(BaseModel):
     user_id: str
