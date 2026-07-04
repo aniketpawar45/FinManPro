@@ -33,9 +33,8 @@ async def parse_expense_text(text: str) -> list:
         "4. PAYMENT_METHOD: Deduce if mentioned (e.g., 'Credit Card', 'UPI', 'SBI', 'Bank'). Default to 'Cash/UPI'.\n"
         "5. CATEGORY & SUBCATEGORY: Logical 1-2 word deduction. NEVER use 'Unknown'.\n"
         "6. RECURRING DATES: If text implies recurring, set 'frequency' ('daily', 'monthly', 'yearly'). "
-        "Set 'date_str' to the start date (default to Jan 1st of current year if only a day like '25th' is given). "
-        "Set 'end_date_str' strictly to 'today' UNLESS the user explicitly specifies a future end date.\n"
-        "7. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY if the user mentions moving dates for holidays or weekends (e.g., 'earlier business day')."
+        "Set 'date_str' to start date (default to Jan 1st of current year if only a day like '25th' is given).\n"
+        "7. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY if user mentions moving dates for holidays or weekends."
     )
 
     try:
@@ -71,7 +70,9 @@ async def parse_expense_text(text: str) -> list:
         t_type = ext.transaction_type.title().strip()
         p_method = ext.payment_method.title().strip()
 
-        start_date = get_ist_now().date()
+        today_date = get_ist_now().date()
+        start_date = today_date
+
         if ext.date_str:
             p_date = dateparser.parse(ext.date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
             if p_date: start_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
@@ -79,9 +80,16 @@ async def parse_expense_text(text: str) -> list:
         end_date = start_date
         freq = ext.frequency.lower().strip() if ext.frequency else 'none'
 
-        if freq in ['daily', 'monthly', 'yearly'] and ext.end_date_str:
-            p_end = dateparser.parse(ext.end_date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
-            if p_end: end_date = (IST_TZ.localize(p_end) if p_end.tzinfo is None else p_end).date()
+        if freq in ['daily', 'monthly', 'yearly']:
+            if ext.end_date_str:
+                p_end = dateparser.parse(ext.end_date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
+                if p_end: end_date = (IST_TZ.localize(p_end) if p_end.tzinfo is None else p_end).date()
+            else:
+                end_date = today_date
+
+            # CRITICAL FIX: The Hard Python Clamp. Never allow bulk recurring to generate past today.
+            if end_date > today_date:
+                end_date = today_date
 
         if end_date < start_date: end_date = start_date
 
@@ -91,13 +99,12 @@ async def parse_expense_text(text: str) -> list:
 
         while current_date <= end_date and loops < loop_cap:
 
-            # ================= WEEKEND ADJUSTMENT ENGINE =================
             actual_date = current_date
             if ext.adjust_weekends:
-                if actual_date.weekday() == 5:  # Saturday (Index 5)
-                    actual_date -= timedelta(days=1)  # Shift to Friday
-                elif actual_date.weekday() == 6:  # Sunday (Index 6)
-                    actual_date -= timedelta(days=2)  # Shift to Friday
+                if actual_date.weekday() == 5:  # Saturday
+                    actual_date -= timedelta(days=1)
+                elif actual_date.weekday() == 6:  # Sunday
+                    actual_date -= timedelta(days=2)
 
             results.append((amt, item, actual_date, cat, subcat, remarks, t_type, p_method))
 

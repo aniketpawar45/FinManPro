@@ -12,7 +12,6 @@ from core.engine import parse_expense_text, transcribe_audio
 from core.models import TransactionRecord
 from core.utils import get_ist_now, FinanceManagerException
 
-# CRITICAL FIX: Removed the defunct handle_csv_export import
 from api.reports import handle_report_command
 from api.stats import handle_statistics_command
 from api.chart import handle_chart_command
@@ -33,13 +32,11 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
     update = await request.json()
 
     try:
-        # ================= PHASE A: CALLBACK HANDLING =================
         if "callback_query" in update:
             q = update["callback_query"]
             chat_id, uid, msg_id, data = q["message"]["chat"]["id"], str(q["from"]["id"]), q["message"]["message_id"], \
             q["data"]
 
-            # CRITICAL FIX: Removed the obsolete 'csv:' button logic
             if data == "cancel":
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="🚫 Entry cancelled.")
             elif data.startswith("unk:"):
@@ -60,7 +57,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
                                             text=f"✅ Saved Future Entry: {desc_snippet} - ₹{amt} ({ai_cat})")
 
-        # ================= PHASE B: MESSAGE HANDLING =================
         elif "message" in update:
             msg = update["message"]
             chat_id, uid = msg["chat"]["id"], str(msg["from"]["id"])
@@ -156,7 +152,8 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         if is_bulk:
                             bulk_records_to_save.append(record)
                             total_amt += amt
-                            saved_details.append(f"• {item_name}: ₹{amt} ({final_cat}/{final_subcat})")
+                            # CRITICAL FIX: The preview will now show the actual saved dates
+                            saved_details.append(f"• {item_date.strftime('%d %b')}: {item_name} (₹{amt:,.0f})")
                         else:
                             save_transaction(record)
                             await bot.send_message(chat_id,
@@ -174,8 +171,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     elif is_bulk and dup_count > 0 and not bulk_records_to_save:
                         await bot.send_message(chat_id,
                                                f"🛡️ Ignored bulk list. All {dup_count} items were already saved recently.")
-
-    # ================= ENTERPRISE TRIAGE ENGINE =================
 
     except FinanceManagerException as e:
         fault_type = "APPLICATION FAULT"
