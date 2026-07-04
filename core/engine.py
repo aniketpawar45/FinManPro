@@ -39,13 +39,15 @@ async def parse_expense_text(text: str) -> list:
     try:
         res = await client.chat.completions.create(
             messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
-            model="llama-3.3-70b-versatile",
+            # CRITICAL FIX 1: Switch to 8b-instant to bypass the 70b rate limit block instantly.
+            model="llama-3.1-8b-instant",
             response_format={"type": "json_object"},
             temperature=0.0,
-            max_tokens=6000  # Slightly reduced to safely fit within Free Tier constraints
+            # CRITICAL FIX 2: Lowered to 2500. Still fits ~120 items, but gives you 40 API calls per day on Free Tier.
+            max_tokens=2500
         )
     except Exception as e:
-        # CRITICAL FIX: If Groq hits a rate limit, the bot will now explicitly tell you.
+        # If Groq hits a rate limit, the bot explicitly reports it.
         raise FinanceManagerException("AI Processing", f"Groq API Error: {str(e)}",
                                       "If you just ran a bulk upload, wait 60 seconds and try again.")
 
