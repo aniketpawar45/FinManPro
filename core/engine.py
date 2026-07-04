@@ -22,10 +22,11 @@ async def parse_expense_text(text: str) -> list:
         "You are an elite financial AI. Extract ALL expenses from the text into JSON with an 'items' array. "
         "Each object must have: amount (number), item_name (string), date_str (string, optional), category (string), subcategory (string), remarks (string). "
         "RULES:\n"
-        "1. 'item_name' MUST be the pure item name ONLY (e.g., 'Toor Dal', 'Rice'). DO NOT include quantities or weights here.\n"
-        "2. 'remarks' MUST contain the full original string including quantities (e.g., 'Toor Dal - 2 kg').\n"
-        "3. 'category' MUST be a High-Level bucket ONLY: Food, Household, Transport, Health, Housing, Entertainment, Shopping, Utilities, Misc.\n"
-        "4. 'subcategory' is a specific 1-2 word description (e.g., Groceries, Pulses, Meat, Cleaning).\n"
+        "1. Process EVERY item. Do not skip any. Ignore headers like 'GRAINS' or 'TOTAL' as items, but use them for context.\n"
+        "2. 'item_name' MUST be the pure item name ONLY (e.g., 'Toor Dal', 'Rice'). DO NOT include quantities or weights here.\n"
+        "3. 'remarks' MUST contain the full original string including quantities (e.g., 'Toor Dal - 2 kg').\n"
+        "4. 'category' MUST be a High-Level bucket ONLY: Food, Household, Transport, Health, Housing, Entertainment, Shopping, Utilities, Misc.\n"
+        "5. 'subcategory' is a specific 1-2 word description (e.g., Groceries, Pulses, Meat, Cleaning).\n"
         "EXAMPLES:\n"
         "User: 'Toor Dal - 2 kg - 360'\n"
         "Output: {\"items\": [{\"amount\": 360, \"item_name\": \"Toor Dal\", \"category\": \"Food\", \"subcategory\": \"Pulses\", \"remarks\": \"Toor Dal - 2 kg - 360\"}]}"
@@ -35,7 +36,8 @@ async def parse_expense_text(text: str) -> list:
         messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
         model="llama-3.3-70b-versatile",
         response_format={"type": "json_object"},
-        temperature=0.0
+        temperature=0.0,
+        max_tokens=8000  # CRITICAL FIX: Ensures the AI does not cut off massive bulk lists.
     )
 
     batch = ExpenseBatch.model_validate_json(res.choices[0].message.content)

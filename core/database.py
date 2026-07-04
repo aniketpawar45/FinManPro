@@ -26,16 +26,43 @@ def get_last_category(item_name: str):
 def check_duplicate(user_id: str, amount: float, item_name: str, transaction_date: date) -> bool:
     try:
         ten_sec_ago = (get_ist_now() - timedelta(seconds=10)).isoformat()
-        res = supabase.table("transactions").select("id") \
-            .eq("user_id", user_id) \
-            .eq("amount", amount) \
-            .eq("item_name", item_name.title()) \
-            .eq("transaction_date", transaction_date.isoformat()) \
-            .gt("created_at", ten_sec_ago) \
-            .execute()
+        res = supabase.table("transactions").select("id").eq("user_id", user_id).eq("amount", amount).eq("item_name",
+                                                                                                         item_name.title()).eq(
+            "transaction_date", transaction_date.isoformat()).gt("created_at", ten_sec_ago).execute()
         return len(res.data) > 0
     except:
         return False
+
+
+def filter_bulk_duplicates(user_id: str, extracted_data: list) -> tuple:
+    """
+    CRITICAL FIX: Makes ONE single database call to fetch the last 60 seconds of transactions.
+    Filters out duplicates from Telegram retries in-memory to bypass Vercel timeouts.
+    """
+    try:
+        sixty_sec_ago = (get_ist_now() - timedelta(seconds=60)).isoformat()
+        res = supabase.table("transactions").select("amount, item_name").eq("user_id", user_id).gt("created_at",
+                                                                                                   sixty_sec_ago).execute()
+
+        # Store existing items as a fast lookup set
+        existing_records = {(float(r['amount']), r['item_name'].title()) for r in res.data}
+
+        unique_data = []
+        dup_count = 0
+
+        for data in extracted_data:
+            amt, item_name = float(data[0]), data[1].title()
+            if (amt, item_name) in existing_records:
+                dup_count += 1
+            else:
+                unique_data.append(data)
+                # Add to set to prevent duplicates within the same incoming bulk list
+                existing_records.add((amt, item_name))
+
+        return unique_data, dup_count
+    except Exception as e:
+        logger.error(f"Bulk duplicate filter failed: {str(e)}")
+        return extracted_data, 0
 
 
 def save_transaction(record: TransactionRecord) -> bool:
@@ -56,20 +83,12 @@ def save_transaction(record: TransactionRecord) -> bool:
 
 
 def save_transactions_bulk(records: list[TransactionRecord]) -> bool:
-    """CRITICAL FIX: Submits an entire array of records in ONE single millisecond network trip."""
     try:
         if not records: return True
-        data = [
-            {
-                "user_id": r.user_id,
-                "amount": r.amount,
-                "category": r.category,
-                "subcategory": r.subcategory,
-                "item_name": r.item_name.title(),
-                "transaction_date": r.transaction_date.isoformat(),
-                "remarks": r.remarks
-            } for r in records
-        ]
+        data = [{
+            "user_id": r.user_id, "amount": r.amount, "category": r.category, "subcategory": r.subcategory,
+            "item_name": r.item_name.title(), "transaction_date": r.transaction_date.isoformat(), "remarks": r.remarks
+        } for r in records]
         supabase.table("transactions").insert(data).execute()
         return True
     except Exception as e:
@@ -90,8 +109,7 @@ def get_user_stats(user_id: str) -> str:
             total += a
 
         msg = f"💰 **Total Spent: ₹{total:,.2f}**\n\n**Breakdown:**\n"
-        for c, a in sorted(cat_map.items(), key=lambda x: x[1], reverse=True):
-            msg += f"{c}: ₹{a:,.2f}\n"
+        for c, a in sorted(cat_map.items(), key=lambda x: x[1], reverse=True): msg += f"{c}: ₹{a:,.2f}\n"
         return msg
     except:
         return "Failed to fetch stats."

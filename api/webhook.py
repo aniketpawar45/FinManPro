@@ -4,7 +4,8 @@ from fastapi import APIRouter, Request, Header, HTTPException
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from datetime import date
 
-from core.database import save_transaction, save_transactions_bulk, check_duplicate, get_last_category
+from core.database import save_transaction, save_transactions_bulk, check_duplicate, filter_bulk_duplicates, \
+    get_last_category
 from core.engine import parse_expense_text, transcribe_audio
 from core.models import TransactionRecord
 from core.utils import get_ist_now, FinanceManagerException
@@ -97,6 +98,12 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     extracted_data = await parse_expense_text(text)
 
                     is_bulk = len(extracted_data) > 1
+                    dup_count = 0
+
+                    # CRITICAL FIX: Extremely fast in-memory duplicate checking for bulk lists
+                    if is_bulk:
+                        extracted_data, dup_count = filter_bulk_duplicates(uid, extracted_data)
+
                     bulk_records_to_save = []
                     total_amt = 0
                     saved_details = []
@@ -104,7 +111,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     for amt, item_name, item_date, ai_cat, ai_subcat, remarks in extracted_data:
                         if amt <= 0: continue
 
-                        # Only check duplicates for single items to save Vercel timeout limits
+                        # Sequential duplicate checking strictly for single uploads
                         if not is_bulk and check_duplicate(uid, amt, item_name, item_date):
                             await bot.send_message(chat_id, f"🛡️ Duplicate prevented: {item_name} - ₹{amt}")
                             continue
@@ -146,12 +153,17 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                                                    f"🤖 Auto-Saved: {item_name} - ₹{amt} ({final_cat} - {final_subcat})\n📝 {remarks}")
 
                     if is_bulk and bulk_records_to_save:
-                        # SUPER FAST BULK INSERT - Prevents Vercel Timeout
                         save_transactions_bulk(bulk_records_to_save)
-                        msg = f"✅ **Bulk Upload Successful!**\n💾 Saved: {len(bulk_records_to_save)} items\n💰 Total Amount: ₹{total_amt:,.2f}\n\n*Preview:*\n" + "\n".join(
-                            saved_details[:15])
+                        msg = f"✅ **Bulk Upload Successful!**\n💾 Saved: {len(bulk_records_to_save)} items\n💰 Total Amount: ₹{total_amt:,.2f}\n"
+                        if dup_count > 0: msg += f"🛡️ Ignored {dup_count} duplicate retries.\n"
+
+                        msg += f"\n*Preview:*\n" + "\n".join(saved_details[:15])
                         if len(saved_details) > 15: msg += f"\n... and {len(saved_details) - 15} more items."
                         await bot.send_message(chat_id, msg, parse_mode="Markdown")
+
+                    elif is_bulk and dup_count > 0 and not bulk_records_to_save:
+                        await bot.send_message(chat_id,
+                                               f"🛡️ Ignored bulk list. All {dup_count} items were already saved recently.")
 
     except FinanceManagerException as e:
         if "chat_id" in locals(): await bot.send_message(chat_id, f"❌ **Error:** {e.message}")
