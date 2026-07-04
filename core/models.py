@@ -8,6 +8,7 @@ class ExpenseExtraction(BaseModel):
     date_str: Optional[str] = Field(default=None)
     category: str = Field(default="Other")
     subcategory: str = Field(default="General")
+    remarks: str = Field(default="")
 
 class ExpenseBatch(BaseModel):
     items: List[ExpenseExtraction] = Field(default_factory=list)
@@ -17,6 +18,6 @@ class TransactionRecord(BaseModel):
     amount: float
     category: str
     subcategory: str
-    description: str
+    item_name: str
     transaction_date: date
     remarks: str = ""

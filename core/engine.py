@@ -18,21 +18,21 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
-    # CRITICAL FIX: Upgraded instructions to handle massive lists, quantities, and strict High-Level buckets.
     sys_prompt = (
         "You are an elite financial AI. Extract ALL expenses from the text into JSON with an 'items' array. "
-        "Each object must have: amount (number), item_name (string), date_str (string, optional), category (string), subcategory (string). "
+        "Each object must have: amount (number), item_name (string), date_str (string, optional), category (string), subcategory (string), remarks (string). "
         "RULES:\n"
-        "1. Process EVERY item. Do not skip any. Ignore headers like 'GRAINS' or 'TOTAL' as items, but use them for context.\n"
-        "2. If quantities exist (e.g., 'Rice - 10 kg'), include them in item_name (e.g., 'Rice 10kg').\n"
+        "1. 'item_name' MUST be the pure item name ONLY (e.g., 'Toor Dal', 'Rice'). DO NOT include quantities or weights here.\n"
+        "2. 'remarks' MUST contain the full original string including quantities (e.g., 'Toor Dal - 2 kg').\n"
         "3. 'category' MUST be a High-Level bucket ONLY: Food, Household, Transport, Health, Housing, Entertainment, Shopping, Utilities, Misc.\n"
-        "4. 'subcategory' is a specific 1-2 word description (e.g., Groceries, Meat, Dairy, Cleaning).\n"
-        "5. NEVER use 'Other' or 'General' unless absolutely unrecognizable."
+        "4. 'subcategory' is a specific 1-2 word description (e.g., Groceries, Pulses, Meat, Cleaning).\n"
+        "EXAMPLES:\n"
+        "User: 'Toor Dal - 2 kg - 360'\n"
+        "Output: {\"items\": [{\"amount\": 360, \"item_name\": \"Toor Dal\", \"category\": \"Food\", \"subcategory\": \"Pulses\", \"remarks\": \"Toor Dal - 2 kg - 360\"}]}"
     )
 
     res = await client.chat.completions.create(
         messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
-        # UPGRADE: Using the 70B model. It handles massive lists flawlessly without hallucinating.
         model="llama-3.3-70b-versatile",
         response_format={"type": "json_object"},
         temperature=0.0
@@ -50,6 +50,7 @@ async def parse_expense_text(text: str) -> list:
 
         cat = ext.category.title().strip() if ext.category else "Misc"
         subcat = ext.subcategory.title().strip() if ext.subcategory else "Unknown"
+        remarks = ext.remarks.strip() if ext.remarks else item
 
         item_date = get_ist_now().date()
         if ext.date_str:
@@ -57,6 +58,6 @@ async def parse_expense_text(text: str) -> list:
             if p_date:
                 item_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
 
-        results.append((amt, item, item_date, cat, subcat))
+        results.append((amt, item, item_date, cat, subcat, remarks))
 
     return results

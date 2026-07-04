@@ -29,9 +29,8 @@ def get_report_data(user_id: str, start: datetime.datetime, end: datetime.dateti
     start_date = start.date().isoformat()
     end_date = end.date().isoformat()
 
-    # Selects the new text columns directly instead of JOINing tables
     res = supabase.table("transactions") \
-        .select("amount, description, transaction_date, category, subcategory") \
+        .select("amount, item_name, transaction_date, category, subcategory, remarks") \
         .eq("user_id", user_id) \
         .gte("transaction_date", start_date) \
         .lte("transaction_date", end_date) \

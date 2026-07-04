@@ -17,8 +17,8 @@ async def handle_report_command(bot: Bot, chat_id: int, command: str, uid: str):
     msg = f"📄 *Financial Report: {label}*\n\n`{'Item':<13} | {'Amt':<6} | {'Cat'}`\n" + "-" * 30 + "\n"
 
     for item in data:
-        amt, desc, cat = float(item['amount']), item['description'][:13], item.get('category', 'Other')
-        msg += f"`{desc:<13} | {amt:<6.0f} |` {'🚨' if amt > (total * 0.3) else '  '} {cat}\n"
+        amt, item_name, cat = float(item['amount']), item['item_name'][:13], item.get('category', 'Other')
+        msg += f"`{item_name:<13} | {amt:<6.0f} |` {'🚨' if amt > (total * 0.3) else '  '} {cat}\n"
 
     msg += "-" * 30 + f"\n💰 *Total Spent: ₹{total:,.2f}*\n\n"
     kb = InlineKeyboardMarkup(
@@ -34,12 +34,13 @@ async def handle_csv_export(bot: Bot, chat_id: int, uid: str, start_ts: float, e
 
     mem_file = io.StringIO()
     writer = csv.writer(mem_file)
-    writer.writerow(["Date", "Item Description", "Category", "Subcategory", "Amount (INR)"])
+    writer.writerow(["Date", "Item Name", "Category", "Subcategory", "Amount (INR)", "Original Remarks"])
 
     for item in data:
         cat = item.get('category', 'Other')
         subcat = item.get('subcategory', 'General')
-        writer.writerow([item['transaction_date'], item['description'], cat, subcat, item['amount']])
+        writer.writerow(
+            [item['transaction_date'], item['item_name'], cat, subcat, item['amount'], item.get('remarks', '')])
 
     mem_file.seek(0)
     byte_stream = io.BytesIO(mem_file.getvalue().encode('utf-8'))

@@ -35,14 +35,15 @@ async def process_scheduled_reports(authorization: str = Header(None)):
 
         mem_file = io.StringIO()
         writer = csv.writer(mem_file)
-        writer.writerow(["Date", "Item Description", "Category", "Subcategory", "Amount (INR)"])
+        writer.writerow(["Date", "Item Name", "Category", "Subcategory", "Amount (INR)", "Original Remarks"])
 
         total = 0.0
         for item in data:
             total += float(item['amount'])
             cat = item.get('category', 'Other')
             subcat = item.get('subcategory', 'General')
-            writer.writerow([item['transaction_date'], item['description'], cat, subcat, item['amount']])
+            writer.writerow(
+                [item['transaction_date'], item['item_name'], cat, subcat, item['amount'], item.get('remarks', '')])
 
         mem_file.seek(0)
         csv_bytes = mem_file.getvalue().encode('utf-8')
