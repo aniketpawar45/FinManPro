@@ -22,16 +22,17 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
-    # CRITICAL FIX: Hardened Anti-Hallucination rules and squished text parsing.
+    # CRITICAL FIX: Added Gibberish Rejection Protocol
     sys_prompt = (
         "You are a strict financial data extraction AI. Extract ONLY the expenses explicitly mentioned in the user text into JSON with an 'items' array. "
         "CRITICAL RULES:\n"
-        "1. ZERO HALLUCINATIONS: You MUST NOT invent, add, or assume any items that are not explicitly in the user's text. If the user writes 1 item, return exactly 1 item.\n"
-        "2. INTELLIGENT PARSING: Safely separate squished text (e.g., 'Milkyesterday34' means item_name: 'Milk', date_str: 'yesterday', amount: 34).\n"
-        "3. 'item_name' MUST be the pure item name ONLY.\n"
-        "4. 'remarks' MUST contain the original text string.\n"
-        "5. 'category' MUST be a High-Level bucket ONLY: Food, Household, Transport, Health, Housing, Entertainment, Shopping, Utilities, Misc.\n"
-        "6. 'subcategory' is a specific 1-2 word description."
+        "1. ZERO HALLUCINATIONS: You MUST NOT invent, add, or assume any items that are not explicitly in the user's text.\n"
+        "2. GIBBERISH REJECTION: If the text is random keystrokes (e.g., 'Hxdhdh46437'), conversational, or clearly NOT a logical expense, you MUST return an EMPTY array: {\"items\": []}.\n"
+        "3. INTELLIGENT PARSING: Safely separate squished text if it forms a real word and number (e.g., 'Milkyesterday34' -> item: 'Milk', amount: 34).\n"
+        "4. 'item_name' MUST be the pure item name ONLY.\n"
+        "5. 'remarks' MUST contain the original text string.\n"
+        "6. 'category' MUST be a High-Level bucket ONLY: Food, Household, Transport, Health, Housing, Entertainment, Shopping, Utilities, Misc.\n"
+        "7. 'subcategory' is a specific 1-2 word description."
     )
 
     try:
@@ -39,7 +40,7 @@ async def parse_expense_text(text: str) -> list:
             messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
             model="llama-3.1-8b-instant",
             response_format={"type": "json_object"},
-            temperature=0.0,  # Zero temperature ensures it stays highly deterministic and literal
+            temperature=0.0,
             max_tokens=2500
         )
     except Exception as e:

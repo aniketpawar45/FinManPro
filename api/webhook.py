@@ -102,6 +102,12 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     await bot.send_chat_action(chat_id=chat_id, action='typing')
                     extracted_data = await parse_expense_text(text)
 
+                    # CRITICAL FIX: Intercept Empty/Gibberish Returns
+                    if not extracted_data:
+                        await bot.send_message(chat_id,
+                                               "⚠️ **Invalid Entry:** I couldn't recognize a valid expense. Please provide a clear item and amount (e.g., 'Milk 40').")
+                        return {"status": "ok"}
+
                     is_bulk = len(extracted_data) > 1
                     dup_count = 0
 
@@ -171,7 +177,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
     # ================= ENTERPRISE TRIAGE ENGINE =================
 
     except FinanceManagerException as e:
-        # Categorize business logic exceptions (Database vs AI)
         fault_type = "APPLICATION FAULT"
         if "Database" in e.step:
             fault_type = "DATABASE FAULT"
@@ -186,7 +191,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                 pass
 
     except httpx.RequestError as e:
-        # Catch explicit network disruptions (e.g., Telegram API down, external DNS failure)
         error_msg = f"🌐 **[NETWORK FAULT]**\n**Node:** `External API Routing`\n**Details:** `{str(e)}`\n**Action:** Verify outbound Vercel connections. Route to DevOps."
         if "chat_id" in locals():
             try:
@@ -195,7 +199,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                 pass
 
     except Exception as e:
-        # Catch Python runtime crashes (TypeErrors, KeyErrors, parsing logic)
         tb_str = traceback.format_exc()
         logger.error(f"CRITICAL SYSTEM ERROR: {tb_str}")
 
