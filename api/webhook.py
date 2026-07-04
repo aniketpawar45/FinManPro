@@ -11,7 +11,9 @@ from core.database import save_transaction, save_transactions_bulk, check_duplic
 from core.engine import parse_expense_text, transcribe_audio
 from core.models import TransactionRecord
 from core.utils import get_ist_now, FinanceManagerException
-from api.reports import handle_report_command, handle_csv_export
+
+# CRITICAL FIX: Removed the defunct handle_csv_export import
+from api.reports import handle_report_command
 from api.stats import handle_statistics_command
 from api.chart import handle_chart_command
 
@@ -31,15 +33,14 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
     update = await request.json()
 
     try:
+        # ================= PHASE A: CALLBACK HANDLING =================
         if "callback_query" in update:
             q = update["callback_query"]
             chat_id, uid, msg_id, data = q["message"]["chat"]["id"], str(q["from"]["id"]), q["message"]["message_id"], \
             q["data"]
 
-            if data.startswith("csv:"):
-                _, start_ts, end_ts = data.split(":")
-                await handle_csv_export(bot, chat_id, uid, float(start_ts), float(end_ts))
-            elif data == "cancel":
+            # CRITICAL FIX: Removed the obsolete 'csv:' button logic
+            if data == "cancel":
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="🚫 Entry cancelled.")
             elif data.startswith("unk:"):
                 parts = data.split(":")
@@ -59,6 +60,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
                                             text=f"✅ Saved Future Entry: {desc_snippet} - ₹{amt} ({ai_cat})")
 
+        # ================= PHASE B: MESSAGE HANDLING =================
         elif "message" in update:
             msg = update["message"]
             chat_id, uid = msg["chat"]["id"], str(msg["from"]["id"])
@@ -115,7 +117,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     total_amt = 0
                     saved_details = []
 
-                    # CRITICAL FIX: Unpacking exactly 8 variables from the AI response
                     for amt, item_name, item_date, ai_cat, ai_subcat, remarks, t_type, p_method in extracted_data:
                         if amt <= 0: continue
 
@@ -146,7 +147,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         final_subcat = mem_subcat if (
                                     mem_subcat and mem_subcat.lower() not in ['general', 'unknown']) else ai_subcat
 
-                        # CRITICAL FIX: Passing the new transaction_type and payment_method into the model
                         record = TransactionRecord(
                             user_id=uid, amount=amt, category=final_cat, subcategory=final_subcat,
                             item_name=item_name, transaction_date=item_date, remarks=remarks,
@@ -174,6 +174,8 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     elif is_bulk and dup_count > 0 and not bulk_records_to_save:
                         await bot.send_message(chat_id,
                                                f"🛡️ Ignored bulk list. All {dup_count} items were already saved recently.")
+
+    # ================= ENTERPRISE TRIAGE ENGINE =================
 
     except FinanceManagerException as e:
         fault_type = "APPLICATION FAULT"
