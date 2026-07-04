@@ -18,11 +18,13 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
+    # CRITICAL FIX: Explicitly instructing the AI to never guess missing items.
     sys_prompt = (
         "Extract expenses into JSON with an 'items' array containing: "
         "amount (number), item_name (string), date_str (string, optional), category_name (string). "
-        "For category_name, dynamically generate the most logical, concise 1-to-2 word category "
-        "(e.g., Electronics, Dining, Travel, Healthcare, Subscriptions). Be highly accurate."
+        "For category_name, dynamically generate a concise 1-to-2 word category. "
+        "CRITICAL RULE: If the user provides ONLY a number without naming an item or service, "
+        "you MUST set item_name to exactly 'Unknown Item'. Do not guess or invent an item name."
     )
 
     res = await client.chat.completions.create(
@@ -40,13 +42,10 @@ async def parse_expense_text(text: str) -> list:
         item = ext.item_name.title() if ext.item_name else "Unknown Item"
         ai_cat = ext.category_name.title() if ext.category_name else "Other"
 
-        # Base date is strictly today's date in IST
         item_date = get_ist_now().date()
-
         if ext.date_str:
             p_date = dateparser.parse(ext.date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
             if p_date:
-                # Localize and extract just the date component
                 item_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
 
         results.append((amt, item, item_date, ai_cat))

@@ -2,12 +2,12 @@ import os
 import httpx
 from fastapi import APIRouter, Request, Header, HTTPException
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from datetime import datetime
+from datetime import date
 
-from core.database import save_transaction, check_duplicate, get_user_stats, get_last_category, supabase
+from core.database import save_transaction, check_duplicate, get_last_category
 from core.engine import parse_expense_text, transcribe_audio
 from core.models import TransactionRecord
-from core.utils import get_ist_now, FinanceManagerException, IST_TZ
+from core.utils import get_ist_now, FinanceManagerException
 from api.reports import handle_report_command, handle_csv_export
 from api.stats import handle_statistics_command
 from api.chart import handle_chart_command
@@ -27,13 +27,11 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
     update = await request.json()
 
     try:
-        # Handle Callbacks (Only for CSV export & cancellation now)
+        # ================= PHASE A: CALLBACK HANDLING =================
         if "callback_query" in update:
             q = update["callback_query"]
             chat_id, uid, msg_id, data = q["message"]["chat"]["id"], str(q["from"]["id"]), q["message"]["message_id"], \
             q["data"]
-
-            # Inside your handle_webhook function, update the callback query parsing section:
 
             if data.startswith("csv:"):
                 _, start_ts, end_ts = data.split(":")
@@ -42,27 +40,27 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
             elif data == "cancel":
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="🚫 Entry cancelled.")
 
-            # Update any interactive buttons to parse dates strictly
-            elif data.startswith("cat:"):
+            elif data.startswith("unk:"):
                 parts = data.split(":")
-                cat_id, amt, desc, d_ts = int(parts[1]), float(parts[2]), parts[3], float(parts[4])
-
-                # Truncate to pure date
-                item_date = datetime.fromtimestamp(d_ts, tz=IST_TZ).date()
-
-                # We need to map cat_id to string name since models.py was updated
-                from core.database import supabase
-                res = supabase.table("categories").select("category_name").eq("id", cat_id).execute()
-                cat_name = res.data[0]['category_name'] if res.data else "Other"
-
+                amt, date_iso, ai_cat = float(parts[1]), parts[2], parts[3]
                 save_transaction(TransactionRecord(
-                    user_id=uid, amount=amt, category_name=cat_name, description=desc, transaction_date=item_date
+                    user_id=uid, amount=amt, category_name=ai_cat, description="Unknown Item",
+                    transaction_date=date.fromisoformat(date_iso)
                 ))
-
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
-                                            text=f"✅ Saved: {desc} - ₹{amt} ({cat_name})")
+                                            text=f"✅ Saved: Unknown Item - ₹{amt} ({ai_cat})")
 
-        # Handle Standard Messages
+            elif data.startswith("fut:"):
+                parts = data.split(":")
+                amt, desc_snippet, date_iso, ai_cat = float(parts[1]), parts[2], parts[3], parts[4]
+                save_transaction(TransactionRecord(
+                    user_id=uid, amount=amt, category_name=ai_cat, description=desc_snippet,
+                    transaction_date=date.fromisoformat(date_iso)
+                ))
+                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
+                                            text=f"✅ Saved Future Entry: {desc_snippet} - ₹{amt} ({ai_cat})")
+
+        # ================= PHASE B: MESSAGE HANDLING =================
         elif "message" in update:
             msg = update["message"]
             chat_id, uid = msg["chat"]["id"], str(msg["from"]["id"])
@@ -91,6 +89,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     await handle_report_command(bot, chat_id, text, uid)
                 elif text.startswith("/subscribe"):
                     try:
+                        from core.database import supabase
                         freq, emails = text.split()[1].lower(), text.split()[2]
                         supabase.table("report_schedules").insert(
                             {"telegram_id": uid, "frequency": freq, "emails": emails, "scheduled_hour": 9}).execute()
@@ -101,29 +100,50 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     await bot.send_message(chat_id, "Unknown command.")
                 else:
                     await bot.send_chat_action(chat_id=chat_id, action='typing')
-
-                    # Process via AI (No hardcoded categories passed)
                     extracted_data = await parse_expense_text(text)
 
-                    for amt, desc, date, ai_cat in extracted_data:
+                    for amt, desc, item_date, ai_cat in extracted_data:
                         if amt <= 0: continue
-                        if check_duplicate(uid, amt, desc):
+
+                        # CRITICAL FIX 1: Duplicate logic now respects the parsed date
+                        if check_duplicate(uid, amt, desc, item_date):
                             await bot.send_message(chat_id, f"🛡️ Duplicate prevented: {desc} - ₹{amt}")
                             continue
 
-                        # Use memory if item exists, otherwise trust the AI's dynamic category
-                        final_category = get_last_category(desc) or ai_cat
+                        # CRITICAL FIX 2: Restored Missing Item Warning
+                        if desc == "Unknown Item":
+                            kb = InlineKeyboardMarkup([
+                                [InlineKeyboardButton("Yes, save it",
+                                                      callback_data=f"unk:{amt}:{item_date.isoformat()}:{ai_cat[:15]}")],
+                                [InlineKeyboardButton("No, cancel", callback_data="cancel")]
+                            ])
+                            await bot.send_message(chat_id,
+                                                   f"⚠️ I found an amount (₹{amt}) but no item name.\nDo you want to save this anyway?",
+                                                   reply_markup=kb)
+                            continue
 
+                        # CRITICAL FIX 3: Restored Future Date Warning
+                        if item_date > get_ist_now().date():
+                            kb = InlineKeyboardMarkup([
+                                [InlineKeyboardButton("Yes, save it",
+                                                      callback_data=f"fut:{amt}:{desc[:15]}:{item_date.isoformat()}:{ai_cat[:15]}")],
+                                [InlineKeyboardButton("No, cancel", callback_data="cancel")]
+                            ])
+                            await bot.send_message(chat_id,
+                                                   f"📅 Future date detected for '{desc}': {item_date.strftime('%Y-%m-%d')}. Are you sure?",
+                                                   reply_markup=kb)
+                            continue
+
+                        final_category = get_last_category(desc) or ai_cat
                         save_transaction(TransactionRecord(
-                            user_id=uid,
-                            amount=amt,
-                            category_name=final_category,
-                            description=desc,
-                            transaction_date=date
+                            user_id=uid, amount=amt, category_name=final_category, description=desc,
+                            transaction_date=item_date
                         ))
 
                         await bot.send_message(chat_id, f"🤖 Auto-Saved: {desc} - ₹{amt} ({final_category})")
 
     except FinanceManagerException as e:
         if "chat_id" in locals(): await bot.send_message(chat_id, f"❌ **Error:** {e.message}")
+    except Exception as e:
+        pass
     return {"status": "ok"}
