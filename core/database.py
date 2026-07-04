@@ -35,18 +35,12 @@ def check_duplicate(user_id: str, amount: float, item_name: str, transaction_dat
 
 
 def filter_bulk_duplicates(user_id: str, extracted_data: list) -> tuple:
-    """
-    CRITICAL FIX: Makes ONE single database call to fetch the last 60 seconds of transactions.
-    Filters out duplicates from Telegram retries in-memory to bypass Vercel timeouts.
-    """
     try:
         sixty_sec_ago = (get_ist_now() - timedelta(seconds=60)).isoformat()
         res = supabase.table("transactions").select("amount, item_name").eq("user_id", user_id).gt("created_at",
                                                                                                    sixty_sec_ago).execute()
 
-        # Store existing items as a fast lookup set
         existing_records = {(float(r['amount']), r['item_name'].title()) for r in res.data}
-
         unique_data = []
         dup_count = 0
 
@@ -56,7 +50,6 @@ def filter_bulk_duplicates(user_id: str, extracted_data: list) -> tuple:
                 dup_count += 1
             else:
                 unique_data.append(data)
-                # Add to set to prevent duplicates within the same incoming bulk list
                 existing_records.add((amt, item_name))
 
         return unique_data, dup_count
@@ -67,6 +60,7 @@ def filter_bulk_duplicates(user_id: str, extracted_data: list) -> tuple:
 
 def save_transaction(record: TransactionRecord) -> bool:
     try:
+        # CRITICAL FIX: Ensuring Supabase receives the new Credit/Debit data
         data = {
             "user_id": record.user_id,
             "amount": record.amount,
@@ -74,7 +68,9 @@ def save_transaction(record: TransactionRecord) -> bool:
             "subcategory": record.subcategory,
             "item_name": record.item_name.title(),
             "transaction_date": record.transaction_date.isoformat(),
-            "remarks": record.remarks
+            "remarks": record.remarks,
+            "transaction_type": record.transaction_type,
+            "payment_method": record.payment_method
         }
         supabase.table("transactions").insert(data).execute()
         return True
@@ -86,8 +82,15 @@ def save_transactions_bulk(records: list[TransactionRecord]) -> bool:
     try:
         if not records: return True
         data = [{
-            "user_id": r.user_id, "amount": r.amount, "category": r.category, "subcategory": r.subcategory,
-            "item_name": r.item_name.title(), "transaction_date": r.transaction_date.isoformat(), "remarks": r.remarks
+            "user_id": r.user_id,
+            "amount": r.amount,
+            "category": r.category,
+            "subcategory": r.subcategory,
+            "item_name": r.item_name.title(),
+            "transaction_date": r.transaction_date.isoformat(),
+            "remarks": r.remarks,
+            "transaction_type": r.transaction_type,
+            "payment_method": r.payment_method
         } for r in records]
         supabase.table("transactions").insert(data).execute()
         return True

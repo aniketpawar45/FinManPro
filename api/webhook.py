@@ -31,7 +31,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
     update = await request.json()
 
     try:
-        # ================= PHASE A: CALLBACK HANDLING =================
         if "callback_query" in update:
             q = update["callback_query"]
             chat_id, uid, msg_id, data = q["message"]["chat"]["id"], str(q["from"]["id"]), q["message"]["message_id"], \
@@ -60,7 +59,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
                                             text=f"✅ Saved Future Entry: {desc_snippet} - ₹{amt} ({ai_cat})")
 
-        # ================= PHASE B: MESSAGE HANDLING =================
         elif "message" in update:
             msg = update["message"]
             chat_id, uid = msg["chat"]["id"], str(msg["from"]["id"])
@@ -102,7 +100,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     await bot.send_chat_action(chat_id=chat_id, action='typing')
                     extracted_data = await parse_expense_text(text)
 
-                    # CRITICAL FIX: Intercept Empty/Gibberish Returns
                     if not extracted_data:
                         await bot.send_message(chat_id,
                                                "⚠️ **Invalid Entry:** I couldn't recognize a valid expense. Please provide a clear item and amount (e.g., 'Milk 40').")
@@ -118,7 +115,8 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     total_amt = 0
                     saved_details = []
 
-                    for amt, item_name, item_date, ai_cat, ai_subcat, remarks in extracted_data:
+                    # CRITICAL FIX: Unpacking exactly 8 variables from the AI response
+                    for amt, item_name, item_date, ai_cat, ai_subcat, remarks, t_type, p_method in extracted_data:
                         if amt <= 0: continue
 
                         if not is_bulk and check_duplicate(uid, amt, item_name, item_date):
@@ -148,9 +146,12 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         final_subcat = mem_subcat if (
                                     mem_subcat and mem_subcat.lower() not in ['general', 'unknown']) else ai_subcat
 
-                        record = TransactionRecord(user_id=uid, amount=amt, category=final_cat,
-                                                   subcategory=final_subcat, item_name=item_name,
-                                                   transaction_date=item_date, remarks=remarks)
+                        # CRITICAL FIX: Passing the new transaction_type and payment_method into the model
+                        record = TransactionRecord(
+                            user_id=uid, amount=amt, category=final_cat, subcategory=final_subcat,
+                            item_name=item_name, transaction_date=item_date, remarks=remarks,
+                            transaction_type=t_type, payment_method=p_method
+                        )
 
                         if is_bulk:
                             bulk_records_to_save.append(record)
@@ -159,7 +160,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         else:
                             save_transaction(record)
                             await bot.send_message(chat_id,
-                                                   f"🤖 Auto-Saved: {item_name} - ₹{amt} ({final_cat} - {final_subcat})\n📝 {remarks}")
+                                                   f"🤖 Auto-Saved: {item_name} - ₹{amt} ({final_cat} - {final_subcat})\n💳 *{t_type} via {p_method}*\n📝 {remarks}")
 
                     if is_bulk and bulk_records_to_save:
                         save_transactions_bulk(bulk_records_to_save)
@@ -173,8 +174,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     elif is_bulk and dup_count > 0 and not bulk_records_to_save:
                         await bot.send_message(chat_id,
                                                f"🛡️ Ignored bulk list. All {dup_count} items were already saved recently.")
-
-    # ================= ENTERPRISE TRIAGE ENGINE =================
 
     except FinanceManagerException as e:
         fault_type = "APPLICATION FAULT"
