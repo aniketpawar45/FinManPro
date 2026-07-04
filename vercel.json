@@ -1,0 +1,19 @@
+{
+  "regions": ["bom1"],
+  "rewrites": [
+    {
+      "source": "/api/webhook",
+      "destination": "/api/main.py"
+    },
+    {
+      "source": "/api/cron",
+      "destination": "/api/main.py"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron",
+      "schedule": "0 9 * * *"
+    }
+  ]
+}
