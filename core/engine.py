@@ -23,8 +23,13 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
+    # CRITICAL FIX: Injecting exact system time into the AI's brain so it knows the current year.
+    current_date_str = get_ist_now().strftime("%B %d, %Y")
+    current_year_str = get_ist_now().strftime("%Y")
+
     sys_prompt = (
-        "You are a strict financial data extraction AI. Extract the financial entries into JSON with an 'items' array. "
+        f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
+        "Extract the financial entries into JSON with an 'items' array. "
         "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method, frequency, end_date_str, adjust_weekends. "
         "CRITICAL RULES:\n"
         "1. ZERO HALLUCINATIONS: Do not invent items.\n"
@@ -32,8 +37,8 @@ async def parse_expense_text(text: str) -> list:
         "3. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
         "4. PAYMENT_METHOD: Deduce if mentioned (e.g., 'Credit Card', 'UPI', 'SBI', 'Bank'). Default to 'Cash/UPI'.\n"
         "5. CATEGORY & SUBCATEGORY: Logical 1-2 word deduction. NEVER use 'Unknown'.\n"
-        "6. RECURRING DATES: If text implies recurring, set 'frequency' ('daily', 'monthly', 'yearly'). "
-        "Set 'date_str' to start date (default to Jan 1st of current year if only a day like '25th' is given).\n"
+        f"6. RECURRING DATES: If recurring, set 'frequency' ('daily', 'monthly', 'yearly'). "
+        f"Set 'date_str' to start date (default to Jan 1st of {current_year_str} if only a day like '25th' is given).\n"
         "7. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY if user mentions moving dates for holidays or weekends."
     )
 
@@ -87,7 +92,6 @@ async def parse_expense_text(text: str) -> list:
             else:
                 end_date = today_date
 
-            # CRITICAL FIX: The Hard Python Clamp. Never allow bulk recurring to generate past today.
             if end_date > today_date:
                 end_date = today_date
 
