@@ -7,10 +7,11 @@ class ExpenseExtraction(BaseModel):
     amount: float = Field(default=0.0)
     item_name: str = Field(default="")
     date_str: Optional[str] = Field(default=None)
-
-    # CRITICAL FIX: Added fields for temporal expansion (recurring dates)
     end_date_str: Optional[str] = Field(default=None)
     frequency: str = Field(default="none")
+
+    # CRITICAL FIX: Added switch for Business Day logic
+    adjust_weekends: bool = Field(default=False)
 
     category: str = Field(default="Misc")
     subcategory: str = Field(default="Unknown")
