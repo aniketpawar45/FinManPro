@@ -112,9 +112,17 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     bulk_records_to_save = []
                     total_amt = 0
                     saved_details = []
+                    future_skipped = 0  # Track skipped futures
 
                     for amt, item_name, item_date, ai_cat, ai_subcat, remarks, t_type, p_method in extracted_data:
                         if amt <= 0: continue
+
+                        is_future = item_date > get_ist_now().date()
+
+                        # CRITICAL FIX: Loophole Closed. Instantly drop any future dates from a bulk payload.
+                        if is_bulk and is_future:
+                            future_skipped += 1
+                            continue
 
                         if not is_bulk and check_duplicate(uid, amt, item_name, item_date):
                             await bot.send_message(chat_id, f"🛡️ Duplicate prevented: {item_name} - ₹{amt}")
@@ -129,7 +137,8 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                                                    reply_markup=kb)
                             continue
 
-                        if not is_bulk and item_date > get_ist_now().date():
+                        # Singular entries still get the Future confirmation warning
+                        if not is_bulk and is_future:
                             kb = InlineKeyboardMarkup([[InlineKeyboardButton("Yes, save it",
                                                                              callback_data=f"fut:{amt}:{item_name[:10]}:{item_date.isoformat()}:{ai_cat[:10]}:{ai_subcat[:10]}")],
                                                        [InlineKeyboardButton("No, cancel", callback_data="cancel")]])
@@ -152,7 +161,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         if is_bulk:
                             bulk_records_to_save.append(record)
                             total_amt += amt
-                            # CRITICAL FIX: The preview will now show the actual saved dates
                             saved_details.append(f"• {item_date.strftime('%d %b')}: {item_name} (₹{amt:,.0f})")
                         else:
                             save_transaction(record)
@@ -163,6 +171,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         save_transactions_bulk(bulk_records_to_save)
                         msg = f"✅ **Bulk Upload Successful!**\n💾 Saved: {len(bulk_records_to_save)} items\n💰 Total Amount: ₹{total_amt:,.2f}\n"
                         if dup_count > 0: msg += f"🛡️ Ignored {dup_count} duplicate retries.\n"
+                        if future_skipped > 0: msg += f"⏭️ Skipped {future_skipped} future entries.\n"
 
                         msg += f"\n*Preview:*\n" + "\n".join(saved_details[:15])
                         if len(saved_details) > 15: msg += f"\n... and {len(saved_details) - 15} more items."
