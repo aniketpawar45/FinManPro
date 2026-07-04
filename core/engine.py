@@ -26,19 +26,17 @@ async def parse_expense_text(text: str) -> list:
     current_date_str = get_ist_now().strftime("%B %d, %Y")
     current_year_str = get_ist_now().strftime("%Y")
 
-    # CRITICAL FIXES: Enforced Indian Number Math (Lakhs) and clarified the Weekend rule trigger.
+    # CRITICAL FIX: Disciplining the AI to explicitly populate 'frequency' and write out full date strings.
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
         "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method, frequency, end_date_str, adjust_weekends. "
         "CRITICAL RULES:\n"
-        "1. ZERO HALLUCINATIONS: Do not invent items.\n"
-        "2. AMOUNT PARSING (INDIAN SYSTEM): 'l' or 'lakh' means 100,000. '1.5l' = 150000. '2.51l' = 251000. NEVER multiply by 1,000,000.\n"
-        "3. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
-        "4. PAYMENT_METHOD: Deduce if mentioned. Default to 'Cash/UPI'.\n"
-        "5. RECURRING DATES: If recurring, output EXACTLY ONE item. Set 'frequency' strictly to: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', or 'yearly'. "
-        f"Set 'date_str' to start date (default to Jan 1st of {current_year_str} if only a day is given).\n"
-        "6. ADJUST WEEKENDS: If the user explicitly mentions 'earlier business day' or 'holiday' for a specific item, set 'adjust_weekends' to true for THAT ITEM ONLY."
+        "1. AMOUNT PARSING (INDIAN SYSTEM): 'l' or 'lakh' = 100,000. '1.5l' = 150000. NEVER multiply by 1,000,000.\n"
+        "2. RECURRING FREQUENCY (MANDATORY): If recurring, output EXACTLY ONE item. You MUST populate the 'frequency' field with: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', or 'yearly'. Do not leave it blank.\n"
+        f"3. FULL DATES REQUIRED: Never output just a day like '25th'. You MUST construct the full date in 'date_str' (e.g., 'Jan 25, {current_year_str}'). If no month is specified, default to January of {current_year_str}.\n"
+        "4. ADJUST WEEKENDS: If the user mentions 'business day', 'holiday', or 'weekend' for a specific item, set 'adjust_weekends' to true for THAT ITEM ONLY.\n"
+        "5. CATEGORY & METHOD: Deduce logical categories. Deduce payment method (default 'Cash/UPI')."
     )
 
     try:
