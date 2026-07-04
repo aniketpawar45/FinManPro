@@ -21,16 +21,18 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
+    # CRITICAL FIX: Added explicit Subcategory Inference engine and banned "Unknown"
     sys_prompt = (
         "You are a strict financial data extraction AI. Extract the financial entries into JSON with an 'items' array. "
         "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method. "
         "CRITICAL RULES:\n"
         "1. ZERO HALLUCINATIONS: Do not invent items.\n"
         "2. GIBBERISH REJECTION: If text is random/invalid, return an EMPTY array: {\"items\": []}.\n"
-        "3. TRANSACTION_TYPE: Classify as 'Income' (e.g., Salary, refund, received money) or 'Expense' (e.g., bought, paid, standard items).\n"
-        "4. PAYMENT_METHOD: Deduce if mentioned (e.g., 'Credit Card', 'Debit Card', 'UPI', 'Cash'). Default to 'Cash/UPI' if unknown.\n"
-        "5. 'item_name' is the pure name. 'remarks' contains the full original string.\n"
-        "6. Categories must be High-Level (Food, Transport, Utilities, Income, Shopping, etc.)."
+        "3. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
+        "4. PAYMENT_METHOD: Deduce if mentioned (e.g., 'Credit Card', 'UPI', 'PhonePe', 'GPay', 'Cash'). Default to 'Cash/UPI'.\n"
+        "5. CATEGORY: MUST be a High-Level bucket (e.g., Food, Transport, Shopping, Income, Housing, Utilities, Health).\n"
+        "6. SUBCATEGORY INFERENCE: NEVER use 'Unknown'. You MUST logically deduce a 1-2 word subcategory from the context (e.g., 'shirt' -> 'Clothing', a person's name -> 'Personal Transfer', 'zomato' -> 'Dining').\n"
+        "7. 'item_name' is the pure name. 'remarks' contains the full original string."
     )
 
     try:
@@ -61,7 +63,12 @@ async def parse_expense_text(text: str) -> list:
         if item in [str(amt), str(int(amt)), "", "Unknown Item"]: item = "Unknown Item"
 
         cat = ext.category.title().strip() if ext.category else "Misc"
-        subcat = ext.subcategory.title().strip() if ext.subcategory else "Unknown"
+
+        # Fallback in case the AI still disobeys the ban on "Unknown"
+        subcat = ext.subcategory.title().strip() if ext.subcategory else "General"
+        if subcat.lower() == "unknown":
+            subcat = "General"
+
         remarks = ext.remarks.strip() if ext.remarks else item
 
         t_type = ext.transaction_type.title().strip()
@@ -72,7 +79,6 @@ async def parse_expense_text(text: str) -> list:
             p_date = dateparser.parse(ext.date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
             if p_date: item_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
 
-        # Passing 8 variables now to match the UI updates needed later
         results.append((amt, item, item_date, cat, subcat, remarks, t_type, p_method))
 
     return results
