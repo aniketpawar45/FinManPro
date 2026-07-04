@@ -22,34 +22,28 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
 
+    # CRITICAL FIX: Hardened Anti-Hallucination rules and squished text parsing.
     sys_prompt = (
-        "You are an elite financial AI. Extract ALL expenses from the text into JSON with an 'items' array. "
-        "Each object must have: amount (number), item_name (string), date_str (string, optional), category (string), subcategory (string), remarks (string). "
-        "RULES:\n"
-        "1. Process EVERY item. Do not skip any.\n"
-        "2. 'item_name' MUST be the pure item name ONLY (e.g., 'Toor Dal', 'Rice'). DO NOT include quantities here.\n"
-        "3. 'remarks' MUST contain the full original string including quantities (e.g., 'Toor Dal - 2 kg').\n"
-        "4. 'category' MUST be a High-Level bucket ONLY: Food, Household, Transport, Health, Housing, Entertainment, Shopping, Utilities, Misc.\n"
-        "5. 'subcategory' is a specific 1-2 word description.\n"
-        "EXAMPLES:\n"
-        "User: 'Toor Dal - 2 kg - 360'\n"
-        "Output: {\"items\": [{\"amount\": 360, \"item_name\": \"Toor Dal\", \"category\": \"Food\", \"subcategory\": \"Pulses\", \"remarks\": \"Toor Dal - 2 kg - 360\"}]}"
+        "You are a strict financial data extraction AI. Extract ONLY the expenses explicitly mentioned in the user text into JSON with an 'items' array. "
+        "CRITICAL RULES:\n"
+        "1. ZERO HALLUCINATIONS: You MUST NOT invent, add, or assume any items that are not explicitly in the user's text. If the user writes 1 item, return exactly 1 item.\n"
+        "2. INTELLIGENT PARSING: Safely separate squished text (e.g., 'Milkyesterday34' means item_name: 'Milk', date_str: 'yesterday', amount: 34).\n"
+        "3. 'item_name' MUST be the pure item name ONLY.\n"
+        "4. 'remarks' MUST contain the original text string.\n"
+        "5. 'category' MUST be a High-Level bucket ONLY: Food, Household, Transport, Health, Housing, Entertainment, Shopping, Utilities, Misc.\n"
+        "6. 'subcategory' is a specific 1-2 word description."
     )
 
     try:
         res = await client.chat.completions.create(
             messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
-            # CRITICAL FIX 1: Switch to 8b-instant to bypass the 70b rate limit block instantly.
             model="llama-3.1-8b-instant",
             response_format={"type": "json_object"},
-            temperature=0.0,
-            # CRITICAL FIX 2: Lowered to 2500. Still fits ~120 items, but gives you 40 API calls per day on Free Tier.
+            temperature=0.0,  # Zero temperature ensures it stays highly deterministic and literal
             max_tokens=2500
         )
     except Exception as e:
-        # If Groq hits a rate limit, the bot explicitly reports it.
-        raise FinanceManagerException("AI Processing", f"Groq API Error: {str(e)}",
-                                      "If you just ran a bulk upload, wait 60 seconds and try again.")
+        raise FinanceManagerException("AI Processing", f"Groq API Error: {str(e)}", "Wait 60 seconds and try again.")
 
     batch = ExpenseBatch.model_validate_json(res.choices[0].message.content)
     results = []
