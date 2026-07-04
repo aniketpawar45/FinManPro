@@ -37,20 +37,27 @@ def check_duplicate(user_id: str, amount: float, item_name: str, transaction_dat
 def filter_bulk_duplicates(user_id: str, extracted_data: list) -> tuple:
     try:
         sixty_sec_ago = (get_ist_now() - timedelta(seconds=60)).isoformat()
-        res = supabase.table("transactions").select("amount, item_name").eq("user_id", user_id).gt("created_at",
-                                                                                                   sixty_sec_ago).execute()
 
-        existing_records = {(float(r['amount']), r['item_name'].title()) for r in res.data}
+        # CRITICAL FIX 1: Ask DB for the transaction_date as well
+        res = supabase.table("transactions").select("amount, item_name, transaction_date").eq("user_id", user_id).gt(
+            "created_at", sixty_sec_ago).execute()
+
+        # CRITICAL FIX 2: Create a unique signature combining Amount + Name + Date
+        existing_records = {(float(r['amount']), r['item_name'].title(), r['transaction_date']) for r in res.data}
         unique_data = []
         dup_count = 0
 
         for data in extracted_data:
-            amt, item_name = float(data[0]), data[1].title()
-            if (amt, item_name) in existing_records:
+            amt, item_name, item_date = float(data[0]), data[1].title(), data[2]
+            date_str = item_date.isoformat()
+
+            # CRITICAL FIX 3: Check against the 3-part signature (Amount + Name + Date)
+            if (amt, item_name, date_str) in existing_records:
                 dup_count += 1
             else:
                 unique_data.append(data)
-                existing_records.add((amt, item_name))
+                # Add this exact date to the memory so we don't duplicate it in the same list
+                existing_records.add((amt, item_name, date_str))
 
         return unique_data, dup_count
     except Exception as e:
@@ -60,7 +67,6 @@ def filter_bulk_duplicates(user_id: str, extracted_data: list) -> tuple:
 
 def save_transaction(record: TransactionRecord) -> bool:
     try:
-        # CRITICAL FIX: Ensuring Supabase receives the new Credit/Debit data
         data = {
             "user_id": record.user_id,
             "amount": record.amount,
@@ -99,6 +105,7 @@ def save_transactions_bulk(records: list[TransactionRecord]) -> bool:
 
 
 def get_user_stats(user_id: str) -> str:
+    # Deprecated for UI Dashboard, but kept for legacy API safety
     try:
         res = supabase.table("transactions").select("category, amount").eq("user_id", user_id).execute()
         if not res.data: return "No expenses logged."
