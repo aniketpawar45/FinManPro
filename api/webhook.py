@@ -27,6 +27,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
     update = await request.json()
 
     try:
+        # ================= PHASE A: CALLBACK HANDLING =================
         if "callback_query" in update:
             q = update["callback_query"]
             chat_id, uid, msg_id, data = q["message"]["chat"]["id"], str(q["from"]["id"]), q["message"]["message_id"], \
@@ -35,30 +36,26 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
             if data.startswith("csv:"):
                 _, start_ts, end_ts = data.split(":")
                 await handle_csv_export(bot, chat_id, uid, float(start_ts), float(end_ts))
-
             elif data == "cancel":
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="🚫 Entry cancelled.")
-
             elif data.startswith("unk:"):
                 parts = data.split(":")
                 amt, date_iso = float(parts[1]), parts[2]
-                save_transaction(TransactionRecord(
-                    user_id=uid, amount=amt, category="Other", subcategory="Unknown", description="Unknown Item",
-                    transaction_date=date.fromisoformat(date_iso)
-                ))
+                save_transaction(TransactionRecord(user_id=uid, amount=amt, category="Misc", subcategory="Unknown",
+                                                   description="Unknown Item",
+                                                   transaction_date=date.fromisoformat(date_iso)))
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
-                                            text=f"✅ Saved: Unknown Item - ₹{amt} (Other - Unknown)")
-
+                                            text=f"✅ Saved: Unknown Item - ₹{amt} (Misc - Unknown)")
             elif data.startswith("fut:"):
                 parts = data.split(":")
                 amt, desc_snippet, date_iso, ai_cat, ai_subcat = float(parts[1]), parts[2], parts[3], parts[4], parts[5]
-                save_transaction(TransactionRecord(
-                    user_id=uid, amount=amt, category=ai_cat, subcategory=ai_subcat, description=desc_snippet,
-                    transaction_date=date.fromisoformat(date_iso)
-                ))
+                save_transaction(TransactionRecord(user_id=uid, amount=amt, category=ai_cat, subcategory=ai_subcat,
+                                                   description=desc_snippet,
+                                                   transaction_date=date.fromisoformat(date_iso)))
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
                                             text=f"✅ Saved Future Entry: {desc_snippet} - ₹{amt} ({ai_cat})")
 
+        # ================= PHASE B: MESSAGE HANDLING =================
         elif "message" in update:
             msg = update["message"]
             chat_id, uid = msg["chat"]["id"], str(msg["from"]["id"])
@@ -100,46 +97,68 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     await bot.send_chat_action(chat_id=chat_id, action='typing')
                     extracted_data = await parse_expense_text(text)
 
+                    # BULK UPLOAD DETECTION LOGIC
+                    is_bulk = len(extracted_data) > 1
+                    total_saved, total_amt, dup_count = 0, 0, 0
+                    saved_details = []
+
                     for amt, desc, item_date, ai_cat, ai_subcat in extracted_data:
                         if amt <= 0: continue
 
                         if check_duplicate(uid, amt, desc, item_date):
-                            await bot.send_message(chat_id, f"🛡️ Duplicate prevented: {desc} - ₹{amt}")
+                            dup_count += 1
+                            if not is_bulk: await bot.send_message(chat_id, f"🛡️ Duplicate prevented: {desc} - ₹{amt}")
                             continue
 
-                        if desc == "Unknown Item":
-                            kb = InlineKeyboardMarkup([
-                                [InlineKeyboardButton("Yes, save it",
-                                                      callback_data=f"unk:{amt}:{item_date.isoformat()}")],
-                                [InlineKeyboardButton("No, cancel", callback_data="cancel")]
-                            ])
+                        # Handle interactive UI only if it's a single item upload
+                        if not is_bulk and desc == "Unknown Item":
+                            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Yes, save it",
+                                                                             callback_data=f"unk:{amt}:{item_date.isoformat()}")],
+                                                       [InlineKeyboardButton("No, cancel", callback_data="cancel")]])
                             await bot.send_message(chat_id,
                                                    f"⚠️ I found an amount (₹{amt}) but no item name.\nDo you want to save this anyway?",
                                                    reply_markup=kb)
                             continue
 
-                        if item_date > get_ist_now().date():
-                            kb = InlineKeyboardMarkup([
-                                [InlineKeyboardButton("Yes, save it",
-                                                      callback_data=f"fut:{amt}:{desc[:10]}:{item_date.isoformat()}:{ai_cat[:10]}:{ai_subcat[:10]}")],
-                                [InlineKeyboardButton("No, cancel", callback_data="cancel")]
-                            ])
+                        if not is_bulk and item_date > get_ist_now().date():
+                            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Yes, save it",
+                                                                             callback_data=f"fut:{amt}:{desc[:10]}:{item_date.isoformat()}:{ai_cat[:10]}:{ai_subcat[:10]}")],
+                                                       [InlineKeyboardButton("No, cancel", callback_data="cancel")]])
                             await bot.send_message(chat_id,
                                                    f"📅 Future date detected for '{desc}': {item_date.strftime('%Y-%m-%d')}. Are you sure?",
                                                    reply_markup=kb)
                             continue
 
-                        # Memory Check: If item exists, use its historical High-Level Category and Subcategory
+                        # CRITICAL FIX: Memory Amnesia. If the DB remembers "Other" or "Misc", ignore it and trust the new AI.
                         mem_cat, mem_subcat = get_last_category(desc)
-                        final_cat = mem_cat if mem_cat else ai_cat
-                        final_subcat = mem_subcat if mem_subcat else ai_subcat
+                        final_cat = mem_cat if (mem_cat and mem_cat.lower() not in ['other', 'misc']) else ai_cat
+                        final_subcat = mem_subcat if (
+                                    mem_subcat and mem_subcat.lower() not in ['general', 'unknown']) else ai_subcat
 
-                        save_transaction(TransactionRecord(
-                            user_id=uid, amount=amt, category=final_cat, subcategory=final_subcat, description=desc,
-                            transaction_date=item_date
-                        ))
+                        save_transaction(
+                            TransactionRecord(user_id=uid, amount=amt, category=final_cat, subcategory=final_subcat,
+                                              description=desc, transaction_date=item_date))
 
-                        await bot.send_message(chat_id, f"🤖 Auto-Saved: {desc} - ₹{amt} ({final_cat} - {final_subcat})")
+                        total_saved += 1
+                        total_amt += amt
+                        saved_details.append(f"• {desc}: ₹{amt} ({final_cat}/{final_subcat})")
+
+                        if not is_bulk:
+                            await bot.send_message(chat_id,
+                                                   f"🤖 Auto-Saved: {desc} - ₹{amt} ({final_cat} - {final_subcat})")
+
+                    # ELEGANT BULK SUMMARY MESSAGE
+                    if is_bulk and total_saved > 0:
+                        msg = f"✅ **Bulk Upload Successful!**\n💾 Saved: {total_saved} items\n💰 Total Amount: ₹{total_amt:,.2f}\n"
+                        if dup_count > 0: msg += f"🛡️ Ignored {dup_count} duplicates.\n"
+
+                        msg += f"\n*Preview:*\n" + "\n".join(saved_details[:15])
+                        if len(saved_details) > 15: msg += f"\n... and {len(saved_details) - 15} more items."
+
+                        await bot.send_message(chat_id, msg, parse_mode="Markdown")
+                    elif is_bulk and dup_count > 0 and total_saved == 0:
+                        await bot.send_message(chat_id,
+                                               f"🛡️ Ignored bulk list. All {dup_count} items were already saved recently.")
 
     except FinanceManagerException as e:
         if "chat_id" in locals(): await bot.send_message(chat_id, f"❌ **Error:** {e.message}")
