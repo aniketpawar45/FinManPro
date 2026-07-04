@@ -1,5 +1,7 @@
 import os
 import httpx
+import logging
+import traceback
 from fastapi import APIRouter, Request, Header, HTTPException
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from datetime import date
@@ -13,6 +15,7 @@ from api.reports import handle_report_command, handle_csv_export
 from api.stats import handle_statistics_command
 from api.chart import handle_chart_command
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 WEBHOOK_SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET_TOKEN")
@@ -28,6 +31,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
     update = await request.json()
 
     try:
+        # ================= PHASE A: CALLBACK HANDLING =================
         if "callback_query" in update:
             q = update["callback_query"]
             chat_id, uid, msg_id, data = q["message"]["chat"]["id"], str(q["from"]["id"]), q["message"]["message_id"], \
@@ -56,6 +60,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
                                             text=f"✅ Saved Future Entry: {desc_snippet} - ₹{amt} ({ai_cat})")
 
+        # ================= PHASE B: MESSAGE HANDLING =================
         elif "message" in update:
             msg = update["message"]
             chat_id, uid = msg["chat"]["id"], str(msg["from"]["id"])
@@ -100,7 +105,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     is_bulk = len(extracted_data) > 1
                     dup_count = 0
 
-                    # CRITICAL FIX: Extremely fast in-memory duplicate checking for bulk lists
                     if is_bulk:
                         extracted_data, dup_count = filter_bulk_duplicates(uid, extracted_data)
 
@@ -111,7 +115,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     for amt, item_name, item_date, ai_cat, ai_subcat, remarks in extracted_data:
                         if amt <= 0: continue
 
-                        # Sequential duplicate checking strictly for single uploads
                         if not is_bulk and check_duplicate(uid, amt, item_name, item_date):
                             await bot.send_message(chat_id, f"🛡️ Duplicate prevented: {item_name} - ₹{amt}")
                             continue
@@ -165,8 +168,42 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         await bot.send_message(chat_id,
                                                f"🛡️ Ignored bulk list. All {dup_count} items were already saved recently.")
 
+    # ================= ENTERPRISE TRIAGE ENGINE =================
+
     except FinanceManagerException as e:
-        if "chat_id" in locals(): await bot.send_message(chat_id, f"❌ **Error:** {e.message}")
+        # Categorize business logic exceptions (Database vs AI)
+        fault_type = "APPLICATION FAULT"
+        if "Database" in e.step:
+            fault_type = "DATABASE FAULT"
+        elif "AI" in e.step or "Voice" in e.step:
+            fault_type = "AI/VENDOR FAULT"
+
+        error_msg = f"❌ **[{fault_type}]**\n**Node:** `{e.step}`\n**Details:** `{e.message}`\n**Action:** {e.action}"
+        if "chat_id" in locals():
+            try:
+                await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
+            except:
+                pass
+
+    except httpx.RequestError as e:
+        # Catch explicit network disruptions (e.g., Telegram API down, external DNS failure)
+        error_msg = f"🌐 **[NETWORK FAULT]**\n**Node:** `External API Routing`\n**Details:** `{str(e)}`\n**Action:** Verify outbound Vercel connections. Route to DevOps."
+        if "chat_id" in locals():
+            try:
+                await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
+            except:
+                pass
+
     except Exception as e:
-        pass
+        # Catch Python runtime crashes (TypeErrors, KeyErrors, parsing logic)
+        tb_str = traceback.format_exc()
+        logger.error(f"CRITICAL SYSTEM ERROR: {tb_str}")
+
+        error_msg = f"🔥 **[APPLICATION FAULT]**\n**Node:** `Vercel Serverless Runtime ({e.__class__.__name__})`\n**Details:** `{str(e)}`\n**Action:** Assign to Backend Engineering Team."
+        if "chat_id" in locals():
+            try:
+                await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
+            except:
+                pass
+
     return {"status": "ok"}

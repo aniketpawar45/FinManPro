@@ -10,9 +10,13 @@ client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 async def transcribe_audio(audio_bytes: bytes) -> str:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
-    res = await client.audio.transcriptions.create(file=("voice.ogg", audio_bytes, "audio/ogg"),
-                                                   model="whisper-large-v3")
-    return res.text.strip()
+    try:
+        res = await client.audio.transcriptions.create(file=("voice.ogg", audio_bytes, "audio/ogg"),
+                                                       model="whisper-large-v3")
+        return res.text.strip()
+    except Exception as e:
+        raise FinanceManagerException("Voice AI", f"Transcription Failed: {str(e)}",
+                                      "Please type your expense instead.")
 
 
 async def parse_expense_text(text: str) -> list:
@@ -22,23 +26,28 @@ async def parse_expense_text(text: str) -> list:
         "You are an elite financial AI. Extract ALL expenses from the text into JSON with an 'items' array. "
         "Each object must have: amount (number), item_name (string), date_str (string, optional), category (string), subcategory (string), remarks (string). "
         "RULES:\n"
-        "1. Process EVERY item. Do not skip any. Ignore headers like 'GRAINS' or 'TOTAL' as items, but use them for context.\n"
-        "2. 'item_name' MUST be the pure item name ONLY (e.g., 'Toor Dal', 'Rice'). DO NOT include quantities or weights here.\n"
+        "1. Process EVERY item. Do not skip any.\n"
+        "2. 'item_name' MUST be the pure item name ONLY (e.g., 'Toor Dal', 'Rice'). DO NOT include quantities here.\n"
         "3. 'remarks' MUST contain the full original string including quantities (e.g., 'Toor Dal - 2 kg').\n"
         "4. 'category' MUST be a High-Level bucket ONLY: Food, Household, Transport, Health, Housing, Entertainment, Shopping, Utilities, Misc.\n"
-        "5. 'subcategory' is a specific 1-2 word description (e.g., Groceries, Pulses, Meat, Cleaning).\n"
+        "5. 'subcategory' is a specific 1-2 word description.\n"
         "EXAMPLES:\n"
         "User: 'Toor Dal - 2 kg - 360'\n"
         "Output: {\"items\": [{\"amount\": 360, \"item_name\": \"Toor Dal\", \"category\": \"Food\", \"subcategory\": \"Pulses\", \"remarks\": \"Toor Dal - 2 kg - 360\"}]}"
     )
 
-    res = await client.chat.completions.create(
-        messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
-        model="llama-3.3-70b-versatile",
-        response_format={"type": "json_object"},
-        temperature=0.0,
-        max_tokens=8000  # CRITICAL FIX: Ensures the AI does not cut off massive bulk lists.
-    )
+    try:
+        res = await client.chat.completions.create(
+            messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
+            model="llama-3.3-70b-versatile",
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=6000  # Slightly reduced to safely fit within Free Tier constraints
+        )
+    except Exception as e:
+        # CRITICAL FIX: If Groq hits a rate limit, the bot will now explicitly tell you.
+        raise FinanceManagerException("AI Processing", f"Groq API Error: {str(e)}",
+                                      "If you just ran a bulk upload, wait 60 seconds and try again.")
 
     batch = ExpenseBatch.model_validate_json(res.choices[0].message.content)
     results = []
