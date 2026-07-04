@@ -26,20 +26,19 @@ async def parse_expense_text(text: str) -> list:
     current_date_str = get_ist_now().strftime("%B %d, %Y")
     current_year_str = get_ist_now().strftime("%Y")
 
-    # CRITICAL FIX: Explicitly forbidding the AI from writing out multiple items for recurring entries.
+    # CRITICAL FIXES: Added Indian number formats, isolated the weekend flag, and expanded frequencies.
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
         "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method, frequency, end_date_str, adjust_weekends. "
         "CRITICAL RULES:\n"
         "1. ZERO HALLUCINATIONS: Do not invent items.\n"
-        "2. GIBBERISH REJECTION: If text is random/invalid, return an EMPTY array: {\"items\": []}.\n"
+        "2. AMOUNT PARSING: '1.5l' or '1.5 lakh' = 150000. 'l' or 'lakh' = 100000. 'k' = 1000.\n"
         "3. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
-        "4. PAYMENT_METHOD: Deduce if mentioned (e.g., 'Credit Card', 'UPI', 'SBI', 'Bank'). Default to 'Cash/UPI'.\n"
-        "5. CATEGORY & SUBCATEGORY: Logical 1-2 word deduction. NEVER use 'Unknown'.\n"
-        f"6. RECURRING DATES (CRITICAL): If recurring, you MUST output EXACTLY ONE item. DO NOT manually generate multiple items. Set 'frequency' ('daily', 'monthly', 'yearly'). "
-        f"Set 'date_str' to start date (default to Jan 1st of {current_year_str} if only a day like '25th' is given).\n"
-        "7. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY if user mentions moving dates for holidays or weekends."
+        "4. PAYMENT_METHOD: Deduce if mentioned. Default to 'Cash/UPI'.\n"
+        "5. RECURRING DATES: If recurring, output EXACTLY ONE item. Set 'frequency' strictly to: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', or 'yearly'. "
+        f"Set 'date_str' to start date (default to Jan 1st of {current_year_str} if only a day is given).\n"
+        "6. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY for the specific individual item where the user requested it. Do NOT apply it globally to other items."
     )
 
     try:
@@ -63,6 +62,14 @@ async def parse_expense_text(text: str) -> list:
         raise FinanceManagerException("AI Parsing Fault", "Corrupted JSON.", "🛑 ROLLBACK INITIATED.")
 
     results = []
+
+    # Helper for complex month math
+    def add_months(curr_date, months_to_add):
+        m = (curr_date.month + months_to_add - 1) % 12 + 1
+        y = curr_date.year + ((curr_date.month + months_to_add - 1) // 12)
+        d = min(curr_date.day, calendar.monthrange(y, m)[1])
+        return date(y, m, d)
+
     for ext in batch.items:
         amt = ext.amount if ext.amount else 0.0
         item = str(ext.item_name).title().strip() if ext.item_name else "Unknown Item"
@@ -85,7 +92,9 @@ async def parse_expense_text(text: str) -> list:
         end_date = start_date
         freq = ext.frequency.lower().strip() if ext.frequency else 'none'
 
-        if freq in ['daily', 'monthly', 'yearly']:
+        valid_freqs = ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly']
+
+        if freq in valid_freqs:
             if ext.end_date_str:
                 p_end = dateparser.parse(ext.end_date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
                 if p_end: end_date = (IST_TZ.localize(p_end) if p_end.tzinfo is None else p_end).date()
@@ -112,15 +121,21 @@ async def parse_expense_text(text: str) -> list:
 
             results.append((amt, item, actual_date, cat, subcat, remarks, t_type, p_method))
 
+            # ================= EXPANDED FREQUENCY ENGINE =================
             if freq == 'daily':
                 current_date += timedelta(days=1)
+            elif freq == 'weekly':
+                current_date += timedelta(days=7)
+            elif freq == 'biweekly':
+                current_date += timedelta(days=14)
             elif freq == 'monthly':
-                m = current_date.month % 12 + 1
-                y = current_date.year + (current_date.month // 12)
-                d = min(current_date.day, calendar.monthrange(y, m)[1])
-                current_date = date(y, m, d)
+                current_date = add_months(current_date, 1)
+            elif freq == 'quarterly':
+                current_date = add_months(current_date, 3)
+            elif freq == 'half-yearly':
+                current_date = add_months(current_date, 6)
             elif freq == 'yearly':
-                current_date = date(current_date.year + 1, current_date.month, current_date.day)
+                current_date = add_months(current_date, 12)
             else:
                 break
 
