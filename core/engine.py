@@ -37,26 +37,23 @@ async def parse_expense_text(raw_text: str) -> list:
 
     clean_text = preprocess_financial_text(raw_text)
 
-    # THE FIX: One-Shot JSON Injection to eliminate all hallucinations.
+    # PRODUCTION FIX: Dual One-Shot JSON Injection & Strict Contextual Boundaries
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
         "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method, frequency, end_date_str, adjust_weekends. "
         "CRITICAL RULES:\n"
-        "1. ZERO HALLUCINATIONS: Do not invent amounts. If user says 'for 27', the amount is EXACTLY 27.\n"
-        "2. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
-        "3. RECURRING DATES: You MUST output EXACTLY ONE JSON object for recurring entries. Set 'frequency' (daily, weekly, biweekly, monthly, quarterly, half-yearly, yearly).\n"
-        "4. STRICT BOOLEAN ISOLATION: Set 'adjust_weekends' to true ONLY if 'business day', 'bank holiday', or 'weekend' is explicitly requested for that item.\n"
-        f"5. HISTORICAL ANCHORING: Anchor dates without a month to January of the current year (e.g. 'Jan 25, {current_year_str}').\n"
+        "1. EXACT AMOUNTS (ZERO MATH): Extract the number EXACTLY as written. If the user says '70', output 70. DO NOT multiply, add, or calculate totals.\n"
+        "2. ONE-TIME vs RECURRING: 'This month' or 'today' implies a ONE-TIME event (frequency: 'none'). 'Every month' or 'monthly' implies a RECURRING event.\n"
+        "3. STRICT BOOLEAN ISOLATION: Set 'adjust_weekends' to true ONLY if 'business day' or 'holiday' shift is explicitly requested for THAT specific item.\n"
+        f"4. HISTORICAL ANCHORING: ONLY if the user says 'EVERY [period]' (like 'every month') WITHOUT a start month, anchor 'date_str' to January of {current_year_str}. If they say 'THIS month', use the current date ({current_date_str}).\n"
+        f"5. NO PAST YEARS: ALWAYS append {current_year_str} to your date strings.\n"
         "6. NO CALENDAR MATH: Output exact calendar dates (e.g. Feb 28). The backend will handle weekend shifts.\n\n"
-        "MANDATORY OUTPUT FORMAT EXAMPLE:\n"
-        "User: \"Salary 2.51l on 25th shift to business day. Milk everyday for 27.\"\n"
-        "Output: {\n"
-        "  \"items\": [\n"
-        f"    {{\"amount\": 251000, \"item_name\": \"Salary\", \"date_str\": \"Jan 25, {current_year_str}\", \"frequency\": \"monthly\", \"adjust_weekends\": true, \"transaction_type\": \"Income\", \"payment_method\": \"Bank\", \"category\": \"Income\", \"subcategory\": \"Salary\"}},\n"
-        f"    {{\"amount\": 27, \"item_name\": \"Milk\", \"date_str\": \"Jan 1, {current_year_str}\", \"frequency\": \"daily\", \"adjust_weekends\": false, \"transaction_type\": \"Expense\", \"payment_method\": \"Cash/UPI\", \"category\": \"Groceries\", \"subcategory\": \"Dairy\"}}\n"
-        "  ]\n"
-        "}"
+        "MANDATORY EXAMPLES:\n"
+        "User: \"Tea 70 for this month\"\n"
+        f"Output: {{\n  \"items\": [\n    {{\"amount\": 70, \"item_name\": \"Tea\", \"date_str\": \"{current_date_str}\", \"frequency\": \"none\", \"adjust_weekends\": false, \"transaction_type\": \"Expense\", \"payment_method\": \"Cash/UPI\", \"category\": \"Dining\", \"subcategory\": \"Beverages\"}}\n  ]\n}}\n\n"
+        "User: \"Salary 2.51l on 25th shift to business day\"\n"
+        f"Output: {{\n  \"items\": [\n    {{\"amount\": 251000, \"item_name\": \"Salary\", \"date_str\": \"Jan 25, {current_year_str}\", \"frequency\": \"monthly\", \"adjust_weekends\": true, \"transaction_type\": \"Income\", \"payment_method\": \"Bank\", \"category\": \"Income\", \"subcategory\": \"Salary\"}}\n  ]\n}}"
     )
 
     try:
@@ -146,7 +143,6 @@ async def parse_expense_text(raw_text: str) -> list:
         while current_date <= end_date and loops < loop_cap:
             actual_date = current_date
 
-            # The backend calendar math execution (now protected by the 1-Shot boolean prompt)
             if ext.adjust_weekends:
                 if actual_date.weekday() == 5:  # Saturday -> Friday
                     actual_date -= timedelta(days=1)
