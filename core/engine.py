@@ -37,21 +37,26 @@ async def parse_expense_text(raw_text: str) -> list:
 
     clean_text = preprocess_financial_text(raw_text)
 
-    # Engine Fix: Restored the Strict Anti-Looping Directive (Rule 5)
+    # THE FIX: One-Shot JSON Injection to eliminate all hallucinations.
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
         "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method, frequency, end_date_str, adjust_weekends. "
         "CRITICAL RULES:\n"
-        "1. ZERO HALLUCINATIONS: Do not invent items.\n"
+        "1. ZERO HALLUCINATIONS: Do not invent amounts. If user says 'for 27', the amount is EXACTLY 27.\n"
         "2. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
-        "3. PAYMENT_METHOD: Deduce if mentioned. Default to 'Cash/UPI'.\n"
-        "4. CATEGORY & SUBCATEGORY: Logical 1-2 word deduction. NEVER use 'Unknown'.\n"
-        f"5. RECURRING DATES (ANTI-LOOPING): You MUST output EXACTLY ONE JSON object for recurring entries. DO NOT manually generate multiple items. Set 'frequency' (Choose ONLY from: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly', 'none').\n"
-        "6. STRICT BOOLEAN ISOLATION: Set 'adjust_weekends' to true ONLY for the SPECIFIC items where a 'business day' or holiday shift is explicitly requested. You MUST default to false for all other items.\n"
-        f"7. NO PAST YEARS: NEVER use a past year. ALWAYS append {current_year_str} to your date strings.\n"
-        f"8. HISTORICAL ANCHORING: If the user provides a recurring item WITHOUT a specific start month, you MUST set 'date_str' to January of the current year (e.g. 'Jan 4, {current_year_str}').\n"
-        "9. NO CALENDAR MATH: Set 'date_str' to the EXACT calendar end. Do NOT attempt to calculate the business day manually."
+        "3. RECURRING DATES: You MUST output EXACTLY ONE JSON object for recurring entries. Set 'frequency' (daily, weekly, biweekly, monthly, quarterly, half-yearly, yearly).\n"
+        "4. STRICT BOOLEAN ISOLATION: Set 'adjust_weekends' to true ONLY if 'business day', 'bank holiday', or 'weekend' is explicitly requested for that item.\n"
+        f"5. HISTORICAL ANCHORING: Anchor dates without a month to January of the current year (e.g. 'Jan 25, {current_year_str}').\n"
+        "6. NO CALENDAR MATH: Output exact calendar dates (e.g. Feb 28). The backend will handle weekend shifts.\n\n"
+        "MANDATORY OUTPUT FORMAT EXAMPLE:\n"
+        "User: \"Salary 2.51l on 25th shift to business day. Milk everyday for 27.\"\n"
+        "Output: {\n"
+        "  \"items\": [\n"
+        f"    {{\"amount\": 251000, \"item_name\": \"Salary\", \"date_str\": \"Jan 25, {current_year_str}\", \"frequency\": \"monthly\", \"adjust_weekends\": true, \"transaction_type\": \"Income\", \"payment_method\": \"Bank\", \"category\": \"Income\", \"subcategory\": \"Salary\"}},\n"
+        f"    {{\"amount\": 27, \"item_name\": \"Milk\", \"date_str\": \"Jan 1, {current_year_str}\", \"frequency\": \"daily\", \"adjust_weekends\": false, \"transaction_type\": \"Expense\", \"payment_method\": \"Cash/UPI\", \"category\": \"Groceries\", \"subcategory\": \"Dairy\"}}\n"
+        "  ]\n"
+        "}"
     )
 
     try:
@@ -141,6 +146,7 @@ async def parse_expense_text(raw_text: str) -> list:
         while current_date <= end_date and loops < loop_cap:
             actual_date = current_date
 
+            # The backend calendar math execution (now protected by the 1-Shot boolean prompt)
             if ext.adjust_weekends:
                 if actual_date.weekday() == 5:  # Saturday -> Friday
                     actual_date -= timedelta(days=1)
