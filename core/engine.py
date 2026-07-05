@@ -1,6 +1,7 @@
 import os
 import calendar
 import dateparser
+import re
 from datetime import timedelta, date
 from groq import AsyncGroq
 from core.models import ExpenseBatch
@@ -20,33 +21,45 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
         raise FinanceManagerException("Voice AI", f"Transcription Failed: {str(e)}", "Please type your entry instead.")
 
 
-async def parse_expense_text(text: str) -> list:
+# Engine Fix: Data Normalization Pipeline
+def preprocess_financial_text(text: str) -> str:
+    """Safely handles localized currency math before the LLM sees it."""
+    # Convert Lakhs (e.g., 2.51l, 1.5 lakhs) to standard integers
+    text = re.sub(r'([\d\.]+)\s*(?:lakhs?|l)\b', lambda m: str(int(float(m.group(1)) * 100000)), text,
+                  flags=re.IGNORECASE)
+    # Convert Thousands (e.g., 4.2k, 5 thousand) to standard integers
+    text = re.sub(r'([\d\.]+)\s*(?:k|thousands?)\b', lambda m: str(int(float(m.group(1)) * 1000)), text,
+                  flags=re.IGNORECASE)
+    return text
+
+
+async def parse_expense_text(raw_text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
     current_date_str = get_ist_now().strftime("%B %d, %Y")
     current_year_str = get_ist_now().strftime("%Y")
 
-    # Engine Fix: Explicit year appending instruction
+    # Pre-process the text to remove math from the LLM's responsibilities
+    clean_text = preprocess_financial_text(raw_text)
+
+    # Hardened AI Prompt
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
         "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method, frequency, end_date_str, adjust_weekends. "
         "CRITICAL RULES:\n"
         "1. ZERO HALLUCINATIONS: Do not invent items.\n"
-        "2. GIBBERISH REJECTION: If text is random/invalid, return an EMPTY array: {\"items\": []}.\n"
-        "3. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
-        "4. PAYMENT_METHOD: Deduce if mentioned (e.g., 'Credit Card', 'UPI', 'SBI', 'Bank'). Default to 'Cash/UPI'.\n"
-        "5. CATEGORY & SUBCATEGORY: Logical 1-2 word deduction. NEVER use 'Unknown'.\n"
-        f"6. RECURRING DATES (CRITICAL): If recurring, you MUST output EXACTLY ONE item. "
-        f"Set 'frequency' (Choose ONLY from: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly', 'none').\n"
-        "7. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY if user mentions moving dates for holidays or business days.\n"
-        "8. CURRENCY FORMATS (STRICT): 'l' or 'lakh' means EXACTLY multiply by 100,000 (e.g. '1.5l' = 150000, '2.51l' = 251000). Leave standard numbers untouched (e.g. '200' = 200).\n"
-        f"9. NO PAST YEARS: NEVER use a past year like 2024. ALWAYS append {current_year_str} to your date strings (e.g., 'Jan 25, {current_year_str}', '9th {current_year_str}', 'Feb 28, {current_year_str}').\n"
-        "10. NO CALENDAR MATH: Set 'date_str' to the EXACT calendar end (e.g. Feb 28, Jun 30). The backend handles business day shifts."
+        "2. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
+        "3. PAYMENT_METHOD: Deduce if mentioned. Default to 'Cash/UPI'.\n"
+        "4. CATEGORY & SUBCATEGORY: Logical 1-2 word deduction. NEVER use 'Unknown'.\n"
+        f"5. RECURRING DATES: Set 'frequency' (Choose ONLY from: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly', 'none').\n"
+        "6. ADJUST WEEKENDS (CRITICAL): If the user mentions 'business day', 'working day', or holidays, you MUST set 'adjust_weekends' to true. Do not attempt to guess the business day yourself.\n"
+        f"7. NO PAST YEARS: NEVER use a past year like 2024. ALWAYS append {current_year_str} to your date strings.\n"
+        "8. NO CALENDAR MATH: Set 'date_str' to the EXACT calendar end (e.g. Feb 28, Jun 30). The backend handles business day shifts."
     )
 
     try:
         res = await client.chat.completions.create(
-            messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": text}],
+            messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": clean_text}],
             model="llama-3.1-8b-instant",
             response_format={"type": "json_object"},
             temperature=0.0,
@@ -86,16 +99,12 @@ async def parse_expense_text(text: str) -> list:
             if p_date:
                 start_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
 
-                # --- CRITICAL ENGINE FIX: OVERRIDE LLM DATE HALLUCINATIONS ---
-
-                # 1. Force into current year if LLM hallucinated 2024 or earlier
                 if start_date.year < today_date.year:
                     try:
                         start_date = start_date.replace(year=today_date.year)
                     except ValueError:
                         start_date = start_date.replace(year=today_date.year, day=28)
 
-                # 2. Historical Anchoring: Rewind generic future dates back to January
                 if start_date > today_date:
                     if freq in ['monthly', 'quarterly', 'half-yearly', 'yearly']:
                         try:
@@ -103,7 +112,6 @@ async def parse_expense_text(text: str) -> list:
                         except ValueError:
                             start_date = start_date.replace(month=1, day=28)
                     elif freq in ['weekly', 'biweekly']:
-                        # Rewind week-by-week to preserve the exact day of the week
                         while start_date.month > 1 and start_date.year == today_date.year:
                             start_date -= timedelta(weeks=1)
 
@@ -116,7 +124,6 @@ async def parse_expense_text(text: str) -> list:
                                          settings={'TIMEZONE': 'Asia/Kolkata', 'RELATIVE_BASE': get_ist_now()})
                 if p_end:
                     end_date = (IST_TZ.localize(p_end) if p_end.tzinfo is None else p_end).date()
-                    # Fix LLM end_date hallucinations
                     if end_date.year < today_date.year:
                         try:
                             end_date = end_date.replace(year=today_date.year)
@@ -131,7 +138,7 @@ async def parse_expense_text(text: str) -> list:
         if end_date < start_date: end_date = start_date
 
         current_date = start_date
-        loop_cap = 1000  # Increased to process large year-to-date backlogs
+        loop_cap = 1000
         loops = 0
 
         while current_date <= end_date and loops < loop_cap:
