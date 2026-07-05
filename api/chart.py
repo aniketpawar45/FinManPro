@@ -29,7 +29,7 @@ async def handle_chart_command(bot, chat_id, command, uid):
     if chart_type == 'polararea':
         chart_type = 'polarArea'
 
-    # Extract timeframe and data
+    # Safely query the upgraded analytics engine
     start, end, label = parse_date_range(query)
     stats = get_statistics_data(uid, start, end)
 
