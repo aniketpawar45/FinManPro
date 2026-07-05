@@ -22,11 +22,10 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 
 async def parse_expense_text(text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
-
     current_date_str = get_ist_now().strftime("%B %d, %Y")
     current_year_str = get_ist_now().strftime("%Y")
 
-    # CRITICAL FIX: Explicitly forbidding the AI from writing out multiple items for recurring entries.
+    # CRITICAL FIX: Expanded AI Prompt for Indian Currencies, New Frequencies, and "Till Date" boundaries.
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
@@ -37,9 +36,12 @@ async def parse_expense_text(text: str) -> list:
         "3. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
         "4. PAYMENT_METHOD: Deduce if mentioned (e.g., 'Credit Card', 'UPI', 'SBI', 'Bank'). Default to 'Cash/UPI'.\n"
         "5. CATEGORY & SUBCATEGORY: Logical 1-2 word deduction. NEVER use 'Unknown'.\n"
-        f"6. RECURRING DATES (CRITICAL): If recurring, you MUST output EXACTLY ONE item. DO NOT manually generate multiple items. Set 'frequency' ('daily', 'monthly', 'yearly'). "
+        f"6. RECURRING DATES (CRITICAL): If recurring, you MUST output EXACTLY ONE item. DO NOT manually generate multiple items. "
+        f"Set 'frequency' (Choose ONLY from: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly', 'none'). "
         f"Set 'date_str' to start date (default to Jan 1st of {current_year_str} if only a day like '25th' is given).\n"
-        "7. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY if user mentions moving dates for holidays or weekends."
+        "7. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY if user mentions moving dates for holidays or weekends.\n"
+        "8. CURRENCY FORMATS: You MUST convert string formats like '2.51l', '1.5lakhs', or '1.5l' strictly into numerical integers (e.g., 251000, 150000).\n"
+        f"9. END DATES: If the user says 'till date', 'until today', or similar, strictly set 'end_date_str' to {current_date_str}."
     )
 
     try:
@@ -55,19 +57,18 @@ async def parse_expense_text(text: str) -> list:
 
     finish_reason = res.choices[0].finish_reason
     if finish_reason in ["length", "max_tokens"]:
-        raise FinanceManagerException("AI Capacity Limit", "Input too massive. Truncated.", "🛑 ROLLBACK INITIATED.")
+        raise FinanceManagerException("AI Capacity Limit", "Input too massive. Truncated.", "  ROLLBACK INITIATED.")
 
     try:
         batch = ExpenseBatch.model_validate_json(res.choices[0].message.content)
     except Exception:
-        raise FinanceManagerException("AI Parsing Fault", "Corrupted JSON.", "🛑 ROLLBACK INITIATED.")
+        raise FinanceManagerException("AI Parsing Fault", "Corrupted JSON.", "  ROLLBACK INITIATED.")
 
     results = []
     for ext in batch.items:
         amt = ext.amount if ext.amount else 0.0
         item = str(ext.item_name).title().strip() if ext.item_name else "Unknown Item"
         if item in [str(amt), str(int(amt)), "", "Unknown Item"]: item = "Unknown Item"
-
         cat = ext.category.title().strip() if ext.category else "Misc"
         subcat = ext.subcategory.title().strip() if ext.subcategory else "General"
         if subcat.lower() == "unknown": subcat = "General"
@@ -85,7 +86,10 @@ async def parse_expense_text(text: str) -> list:
         end_date = start_date
         freq = ext.frequency.lower().strip() if ext.frequency else 'none'
 
-        if freq in ['daily', 'monthly', 'yearly']:
+        # Expanded valid frequency tracker
+        valid_frequencies = ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly']
+
+        if freq in valid_frequencies:
             if ext.end_date_str:
                 p_end = dateparser.parse(ext.end_date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
                 if p_end: end_date = (IST_TZ.localize(p_end) if p_end.tzinfo is None else p_end).date()
@@ -102,8 +106,9 @@ async def parse_expense_text(text: str) -> list:
         loops = 0
 
         while current_date <= end_date and loops < loop_cap:
-
             actual_date = current_date
+
+            # Business day adjust logic (Shifts Saturdays to Friday, Sundays to Friday)
             if ext.adjust_weekends:
                 if actual_date.weekday() == 5:  # Saturday
                     actual_date -= timedelta(days=1)
@@ -112,15 +117,34 @@ async def parse_expense_text(text: str) -> list:
 
             results.append((amt, item, actual_date, cat, subcat, remarks, t_type, p_method))
 
+            # Engine Update: Complex Date-Math Engine supporting new frequencies
             if freq == 'daily':
                 current_date += timedelta(days=1)
+            elif freq == 'weekly':
+                current_date += timedelta(weeks=1)
+            elif freq == 'biweekly':
+                current_date += timedelta(weeks=2)
             elif freq == 'monthly':
                 m = current_date.month % 12 + 1
                 y = current_date.year + (current_date.month // 12)
                 d = min(current_date.day, calendar.monthrange(y, m)[1])
                 current_date = date(y, m, d)
+            elif freq == 'quarterly':
+                m = (current_date.month + 2) % 12 + 1
+                y = current_date.year + ((current_date.month + 2) // 12)
+                d = min(current_date.day, calendar.monthrange(y, m)[1])
+                current_date = date(y, m, d)
+            elif freq == 'half-yearly':
+                m = (current_date.month + 5) % 12 + 1
+                y = current_date.year + ((current_date.month + 5) // 12)
+                d = min(current_date.day, calendar.monthrange(y, m)[1])
+                current_date = date(y, m, d)
             elif freq == 'yearly':
-                current_date = date(current_date.year + 1, current_date.month, current_date.day)
+                try:
+                    current_date = date(current_date.year + 1, current_date.month, current_date.day)
+                except ValueError:
+                    # Handles leap year mapping (e.g., Feb 29 to Feb 28)
+                    current_date = date(current_date.year + 1, current_date.month, current_date.day - 1)
             else:
                 break
 
