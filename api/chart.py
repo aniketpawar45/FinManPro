@@ -29,7 +29,7 @@ async def handle_chart_command(bot, chat_id, command, uid):
     if chart_type == 'polararea':
         chart_type = 'polarArea'
 
-    # Safely query the upgraded analytics engine
+    # Safely query the analytics engine
     start, end, label = parse_date_range(query)
     stats = get_statistics_data(uid, start, end)
 
@@ -37,8 +37,20 @@ async def handle_chart_command(bot, chat_id, command, uid):
         await bot.send_message(chat_id, f"⚠️ No data found for `{label}`.", parse_mode="Markdown")
         return
 
-    labels = list(stats['categories'].keys())
-    data = list(stats['categories'].values())
+    # ---------------------------------------------------------
+    # CRITICAL FIX: Filter out "Income" to fix chart scaling
+    # ---------------------------------------------------------
+    expense_categories = {k: v for k, v in stats['categories'].items() if
+                          k.lower() not in ['income', 'salary', 'bonus']}
+
+    if not expense_categories:
+        await bot.send_message(chat_id, f"⚠️ No *expense* data found for `{label}` (Only income was logged).",
+                               parse_mode="Markdown")
+        return
+
+    labels = list(expense_categories.keys())
+    data = list(expense_categories.values())
+    true_expense_total = sum(data)
 
     # Extended neon color palette
     colors = ["#00B0FF", "#FFAB00", "#00E676", "#AA00FF", "#FF3D00", "#00E5FF", "#F50057", "#E040FB", "#F4FF81",
@@ -51,7 +63,7 @@ async def handle_chart_command(bot, chat_id, command, uid):
         "data": {
             "labels": labels,
             "datasets": [{
-                "label": "Amount (INR)",
+                "label": "Expenses (INR)",
                 "data": data,
                 "backgroundColor": bg_colors,
                 "borderColor": "#121212" if chart_type in ['pie', 'doughnut', 'polarArea'] else bg_colors,
@@ -86,7 +98,7 @@ async def handle_chart_command(bot, chat_id, command, uid):
             "ticks": {
                 "beginAtZero": True,
                 "fontColor": "#B0BEC5",
-                "showLabelBackdrop": False,  # Physically destroys the grey boxes
+                "showLabelBackdrop": False,
                 "backdropColor": "rgba(0,0,0,0)"
             },
             "gridLines": {
@@ -107,7 +119,7 @@ async def handle_chart_command(bot, chat_id, command, uid):
         await bot.send_photo(
             chat_id,
             photo=chart_url,
-            caption=f"📊 **Visual Report: {label}**\n📈 **Format:** {chart_type.capitalize()}\n💰 **Total: ₹{stats['total']:,.2f}**",
+            caption=f"📊 **Visual Report: {label}**\n📈 **Format:** {chart_type.capitalize()}\n💰 **Total Expenses: ₹{true_expense_total:,.2f}**",
             parse_mode="Markdown"
         )
     except Exception as e:
