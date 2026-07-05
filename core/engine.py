@@ -25,7 +25,7 @@ async def parse_expense_text(text: str) -> list:
     current_date_str = get_ist_now().strftime("%B %d, %Y")
     current_year_str = get_ist_now().strftime("%Y")
 
-    # CRITICAL FIX: Hardened AI Prompt for Currency Math, Historical Anchoring, and Calendar Math Sandboxing.
+    # Engine Fix: Explicit year appending instruction
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
@@ -40,8 +40,8 @@ async def parse_expense_text(text: str) -> list:
         f"Set 'frequency' (Choose ONLY from: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly', 'none').\n"
         "7. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY if user mentions moving dates for holidays or business days.\n"
         "8. CURRENCY FORMATS (STRICT): 'l' or 'lakh' means EXACTLY multiply by 100,000 (e.g. '1.5l' = 150000, '2.51l' = 251000). Leave standard numbers untouched (e.g. '200' = 200).\n"
-        "9. HISTORICAL START DATES: If the user says 'Every month on 25th' without a start month, NEVER use a future date. You MUST set 'date_str' to the FIRST occurrence in the current year (e.g. Jan 25, {current_year_str}).\n"
-        "10. NO CALENDAR MATH: Do NOT attempt to calculate 'last business day'. Set the date to the EXACT calendar end (e.g. Feb 28, Jun 30) and set adjust_weekends=true. The backend will shift it."
+        f"9. NO PAST YEARS: NEVER use a past year like 2024. ALWAYS append {current_year_str} to your date strings (e.g., 'Jan 25, {current_year_str}', '9th {current_year_str}', 'Feb 28, {current_year_str}').\n"
+        "10. NO CALENDAR MATH: Set 'date_str' to the EXACT calendar end (e.g. Feb 28, Jun 30). The backend handles business day shifts."
     )
 
     try:
@@ -78,20 +78,50 @@ async def parse_expense_text(text: str) -> list:
 
         today_date = get_ist_now().date()
         start_date = today_date
-
-        if ext.date_str:
-            p_date = dateparser.parse(ext.date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
-            if p_date: start_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
-
-        end_date = start_date
         freq = ext.frequency.lower().strip() if ext.frequency else 'none'
 
+        if ext.date_str:
+            p_date = dateparser.parse(ext.date_str,
+                                      settings={'TIMEZONE': 'Asia/Kolkata', 'RELATIVE_BASE': get_ist_now()})
+            if p_date:
+                start_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
+
+                # --- CRITICAL ENGINE FIX: OVERRIDE LLM DATE HALLUCINATIONS ---
+
+                # 1. Force into current year if LLM hallucinated 2024 or earlier
+                if start_date.year < today_date.year:
+                    try:
+                        start_date = start_date.replace(year=today_date.year)
+                    except ValueError:
+                        start_date = start_date.replace(year=today_date.year, day=28)
+
+                # 2. Historical Anchoring: Rewind generic future dates back to January
+                if start_date > today_date:
+                    if freq in ['monthly', 'quarterly', 'half-yearly', 'yearly']:
+                        try:
+                            start_date = start_date.replace(month=1)
+                        except ValueError:
+                            start_date = start_date.replace(month=1, day=28)
+                    elif freq in ['weekly', 'biweekly']:
+                        # Rewind week-by-week to preserve the exact day of the week
+                        while start_date.month > 1 and start_date.year == today_date.year:
+                            start_date -= timedelta(weeks=1)
+
+        end_date = start_date
         valid_frequencies = ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly']
 
         if freq in valid_frequencies:
             if ext.end_date_str:
-                p_end = dateparser.parse(ext.end_date_str, settings={'TIMEZONE': 'Asia/Kolkata'})
-                if p_end: end_date = (IST_TZ.localize(p_end) if p_end.tzinfo is None else p_end).date()
+                p_end = dateparser.parse(ext.end_date_str,
+                                         settings={'TIMEZONE': 'Asia/Kolkata', 'RELATIVE_BASE': get_ist_now()})
+                if p_end:
+                    end_date = (IST_TZ.localize(p_end) if p_end.tzinfo is None else p_end).date()
+                    # Fix LLM end_date hallucinations
+                    if end_date.year < today_date.year:
+                        try:
+                            end_date = end_date.replace(year=today_date.year)
+                        except ValueError:
+                            pass
             else:
                 end_date = today_date
 
@@ -101,13 +131,12 @@ async def parse_expense_text(text: str) -> list:
         if end_date < start_date: end_date = start_date
 
         current_date = start_date
-        loop_cap = 365
+        loop_cap = 1000  # Increased to process large year-to-date backlogs
         loops = 0
 
         while current_date <= end_date and loops < loop_cap:
             actual_date = current_date
 
-            # Business day adjust logic
             if ext.adjust_weekends:
                 if actual_date.weekday() == 5:  # Saturday -> Friday
                     actual_date -= timedelta(days=1)
@@ -116,7 +145,6 @@ async def parse_expense_text(text: str) -> list:
 
             results.append((amt, item, actual_date, cat, subcat, remarks, t_type, p_method))
 
-            # Engine Update: Complex Date-Math
             if freq == 'daily':
                 current_date += timedelta(days=1)
             elif freq == 'weekly':
