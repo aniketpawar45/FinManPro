@@ -22,7 +22,6 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 
 
 def preprocess_financial_text(text: str) -> str:
-    """Safely handles localized currency math before the LLM sees it, preventing truncation."""
     text = re.sub(r'([\d\.]+)\s*(?:lakhs?|l)\b', lambda m: str(int(round(float(m.group(1)) * 100000))), text,
                   flags=re.IGNORECASE)
     text = re.sub(r'([\d\.]+)\s*(?:k|thousands?)\b', lambda m: str(int(round(float(m.group(1)) * 1000))), text,
@@ -37,23 +36,24 @@ async def parse_expense_text(raw_text: str) -> list:
 
     clean_text = preprocess_financial_text(raw_text)
 
-    # PRODUCTION FIX: Dual One-Shot JSON Injection & Strict Contextual Boundaries
+    # PRODUCTION HOTFIX: Token Limits & Income Lexicon
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
         "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method, frequency, end_date_str, adjust_weekends. "
         "CRITICAL RULES:\n"
-        "1. EXACT AMOUNTS (ZERO MATH): Extract the number EXACTLY as written. If the user says '70', output 70. DO NOT multiply, add, or calculate totals.\n"
-        "2. ONE-TIME vs RECURRING: 'This month' or 'today' implies a ONE-TIME event (frequency: 'none'). 'Every month' or 'monthly' implies a RECURRING event.\n"
-        "3. STRICT BOOLEAN ISOLATION: Set 'adjust_weekends' to true ONLY if 'business day' or 'holiday' shift is explicitly requested for THAT specific item.\n"
-        f"4. HISTORICAL ANCHORING: ONLY if the user says 'EVERY [period]' (like 'every month') WITHOUT a start month, anchor 'date_str' to January of {current_year_str}. If they say 'THIS month', use the current date ({current_date_str}).\n"
-        f"5. NO PAST YEARS: ALWAYS append {current_year_str} to your date strings.\n"
-        "6. NO CALENDAR MATH: Output exact calendar dates (e.g. Feb 28). The backend will handle weekend shifts.\n\n"
+        "1. ZERO HALLUCINATIONS: Do not invent amounts. Extract exact numbers.\n"
+        "2. STRICT INCOME LEXICON: If the user says 'got', 'received', 'loan', 'refund', or 'bonus', classify transaction_type STRICTLY as 'Income'. Only classify as 'Expense' if money is leaving.\n"
+        "3. MASSIVE LIST AGGREGATION (CRITICAL): If the user pastes a massive list (e.g., 20+ grocery items), DO NOT create an object for each item. You will run out of memory. Create EXACTLY ONE object named 'Bulk Grocery/Shopping', sum the visible total, and put the list details in 'remarks'.\n"
+        "4. RECURRING vs ONE-TIME: 'This month' is one-time (frequency: 'none'). 'Every month' or 'Daily' is recurring.\n"
+        "5. STRICT BOOLEAN ISOLATION: Set 'adjust_weekends' to true ONLY if 'business day' or 'holiday' shift is explicitly requested for THAT specific item.\n"
+        f"6. HISTORICAL ANCHORING: If the user says 'EVERY [period]' WITHOUT a start month, anchor 'date_str' to January of {current_year_str}. If they say 'THIS month', use the current date ({current_date_str}).\n"
+        "7. NO CALENDAR MATH: Output exact calendar dates (e.g. Feb 28). The backend will handle shifts.\n\n"
         "MANDATORY EXAMPLES:\n"
         "User: \"Tea 70 for this month\"\n"
         f"Output: {{\n  \"items\": [\n    {{\"amount\": 70, \"item_name\": \"Tea\", \"date_str\": \"{current_date_str}\", \"frequency\": \"none\", \"adjust_weekends\": false, \"transaction_type\": \"Expense\", \"payment_method\": \"Cash/UPI\", \"category\": \"Dining\", \"subcategory\": \"Beverages\"}}\n  ]\n}}\n\n"
-        "User: \"Salary 2.51l on 25th shift to business day\"\n"
-        f"Output: {{\n  \"items\": [\n    {{\"amount\": 251000, \"item_name\": \"Salary\", \"date_str\": \"Jan 25, {current_year_str}\", \"frequency\": \"monthly\", \"adjust_weekends\": true, \"transaction_type\": \"Income\", \"payment_method\": \"Bank\", \"category\": \"Income\", \"subcategory\": \"Salary\"}}\n  ]\n}}"
+        "User: \"got 40 from sushma\"\n"
+        f"Output: {{\n  \"items\": [\n    {{\"amount\": 40, \"item_name\": \"Sushma\", \"date_str\": \"{current_date_str}\", \"frequency\": \"none\", \"adjust_weekends\": false, \"transaction_type\": \"Income\", \"payment_method\": \"Cash/UPI\", \"category\": \"Income\", \"subcategory\": \"Transfer\"}}\n  ]\n}}"
     )
 
     try:
@@ -131,8 +131,7 @@ async def parse_expense_text(raw_text: str) -> list:
             else:
                 end_date = today_date
 
-            if end_date > today_date:
-                end_date = today_date
+            # Allow bounded future dates to pass through (e.g., 'for this week')
 
         if end_date < start_date: end_date = start_date
 

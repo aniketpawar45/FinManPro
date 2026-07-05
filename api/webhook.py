@@ -11,15 +11,16 @@ from core.database import save_transaction, save_transactions_bulk, check_duplic
 from core.engine import parse_expense_text, transcribe_audio
 from core.models import TransactionRecord
 from core.utils import get_ist_now, FinanceManagerException
-
 from api.reports import handle_report_command
 from api.stats import handle_statistics_command
 from api.chart import handle_chart_command
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 WEBHOOK_SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET_TOKEN")
+
 bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 
 
@@ -38,7 +39,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
             q["data"]
 
             if data == "cancel":
-                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="🚫 Entry cancelled.")
+                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="❌ Entry cancelled.")
             elif data.startswith("unk:"):
                 parts = data.split(":")
                 amt, date_iso = float(parts[1]), parts[2]
@@ -91,7 +92,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                             {"telegram_id": uid, "frequency": freq, "emails": emails, "scheduled_hour": 9}).execute()
                         await bot.send_message(chat_id, f"✅ Subscribed: {freq.capitalize()} to {emails}")
                     except:
-                        await bot.send_message(chat_id, "❌ Format: /subscribe <daily|weekly|monthly> <email>")
+                        await bot.send_message(chat_id, "⚠️ Format: /subscribe <daily|weekly|monthly> <email>")
                 elif text.startswith("/"):
                     await bot.send_message(chat_id, "Unknown command.")
                 else:
@@ -112,17 +113,12 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     bulk_records_to_save = []
                     total_amt = 0
                     saved_details = []
-                    future_skipped = 0  # Track skipped futures
 
                     for amt, item_name, item_date, ai_cat, ai_subcat, remarks, t_type, p_method in extracted_data:
                         if amt <= 0: continue
-
                         is_future = item_date > get_ist_now().date()
 
-                        # CRITICAL FIX: Loophole Closed. Instantly drop any future dates from a bulk payload.
-                        if is_bulk and is_future:
-                            future_skipped += 1
-                            continue
+                        # PRODUCTION FIX: Removed the logic that instantly dropped bounded future dates.
 
                         if not is_bulk and check_duplicate(uid, amt, item_name, item_date):
                             await bot.send_message(chat_id, f"🛡️ Duplicate prevented: {item_name} - ₹{amt}")
@@ -137,13 +133,12 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                                                    reply_markup=kb)
                             continue
 
-                        # Singular entries still get the Future confirmation warning
                         if not is_bulk and is_future:
                             kb = InlineKeyboardMarkup([[InlineKeyboardButton("Yes, save it",
                                                                              callback_data=f"fut:{amt}:{item_name[:10]}:{item_date.isoformat()}:{ai_cat[:10]}:{ai_subcat[:10]}")],
                                                        [InlineKeyboardButton("No, cancel", callback_data="cancel")]])
                             await bot.send_message(chat_id,
-                                                   f"📅 Future date detected for '{item_name}': {item_date.strftime('%Y-%m-%d')}. Are you sure?",
+                                                   f"⏳ Future date detected for '{item_name}': {item_date.strftime('%Y-%m-%d')}. Are you sure?",
                                                    reply_markup=kb)
                             continue
 
@@ -171,7 +166,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         save_transactions_bulk(bulk_records_to_save)
                         msg = f"✅ **Bulk Upload Successful!**\n💾 Saved: {len(bulk_records_to_save)} items\n💰 Total Amount: ₹{total_amt:,.2f}\n"
                         if dup_count > 0: msg += f"🛡️ Ignored {dup_count} duplicate retries.\n"
-                        if future_skipped > 0: msg += f"⏭️ Skipped {future_skipped} future entries.\n"
 
                         msg += f"\n*Preview:*\n" + "\n".join(saved_details[:15])
                         if len(saved_details) > 15: msg += f"\n... and {len(saved_details) - 15} more items."
@@ -187,27 +181,23 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
             fault_type = "DATABASE FAULT"
         elif "AI" in e.step or "Voice" in e.step:
             fault_type = "AI/VENDOR FAULT"
-
-        error_msg = f"❌ **[{fault_type}]**\n**Node:** `{e.step}`\n**Details:** `{e.message}`\n**Action:** {e.action}"
+        error_msg = f"❌ **[{fault_type}]**\nNode: `{e.step}`\nDetails: `{e.message}`\nAction: {e.action}"
         if "chat_id" in locals():
             try:
                 await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
             except:
                 pass
-
     except httpx.RequestError as e:
-        error_msg = f"🌐 **[NETWORK FAULT]**\n**Node:** `External API Routing`\n**Details:** `{str(e)}`\n**Action:** Verify outbound Vercel connections. Route to DevOps."
+        error_msg = f"❌ **[NETWORK FAULT]**\nNode: `External API Routing`\nDetails: `{str(e)}`\nAction: Verify outbound Vercel connections. Route to DevOps."
         if "chat_id" in locals():
             try:
                 await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
             except:
                 pass
-
     except Exception as e:
         tb_str = traceback.format_exc()
         logger.error(f"CRITICAL SYSTEM ERROR: {tb_str}")
-
-        error_msg = f"🔥 **[APPLICATION FAULT]**\n**Node:** `Vercel Serverless Runtime ({e.__class__.__name__})`\n**Details:** `{str(e)}`\n**Action:** Assign to Backend Engineering Team."
+        error_msg = f"❌ **[APPLICATION FAULT]**\nNode: `Vercel Serverless Runtime ({e.__class__.__name__})`\nDetails: `{str(e)}`\nAction: Assign to Backend Engineering Team."
         if "chat_id" in locals():
             try:
                 await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
