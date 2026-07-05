@@ -8,6 +8,10 @@
     {
       "source": "/api/cron",
       "destination": "/api/main.py"
+    },
+    {
+      "source": "/api/setup",
+      "destination": "/api/main.py"
     }
   ],
   "crons": [
