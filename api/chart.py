@@ -51,7 +51,7 @@ async def handle_chart_command(bot, chat_id, command, uid):
         "data": {
             "labels": labels,
             "datasets": [{
-                "label": "Expenses (INR)",
+                "label": "Amount (INR)",
                 "data": data,
                 "backgroundColor": bg_colors,
                 "borderColor": "#121212" if chart_type in ['pie', 'doughnut', 'polarArea'] else bg_colors,
@@ -70,8 +70,7 @@ async def handle_chart_command(bot, chat_id, command, uid):
                 "display": True if chart_type in ['pie', 'doughnut', 'polarArea'] else False,
                 "position": "bottom",
                 "labels": {"fontColor": "#B0BEC5"}
-            },
-            "scales": {}
+            }
         }
     }
 
@@ -80,6 +79,25 @@ async def handle_chart_command(bot, chat_id, command, uid):
         chart_config["options"]["scales"] = {
             "yAxes": [{"ticks": {"beginAtZero": True, "fontColor": "#B0BEC5"}, "gridLines": {"color": "#333333"}}],
             "xAxes": [{"ticks": {"fontColor": "#B0BEC5"}, "gridLines": {"color": "#333333"}}]
+        }
+    # Inject Radial scale rendering specifically for polarArea and radar charts
+    elif chart_type in ['radar', 'polarArea']:
+        chart_config["options"]["scale"] = {
+            "ticks": {
+                "beginAtZero": True,
+                "fontColor": "#B0BEC5",
+                "showLabelBackdrop": False,  # Physically destroys the grey boxes
+                "backdropColor": "rgba(0,0,0,0)"
+            },
+            "gridLines": {
+                "color": "#333333"
+            },
+            "angleLines": {
+                "color": "#333333"
+            },
+            "pointLabels": {
+                "fontColor": "#B0BEC5"
+            }
         }
 
     # Encode payload and request image buffer
