@@ -25,7 +25,7 @@ async def parse_expense_text(text: str) -> list:
     current_date_str = get_ist_now().strftime("%B %d, %Y")
     current_year_str = get_ist_now().strftime("%Y")
 
-    # CRITICAL FIX: Expanded AI Prompt for Indian Currencies, New Frequencies, and "Till Date" boundaries.
+    # CRITICAL FIX: Hardened AI Prompt for Currency Math, Historical Anchoring, and Calendar Math Sandboxing.
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
@@ -36,12 +36,12 @@ async def parse_expense_text(text: str) -> list:
         "3. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
         "4. PAYMENT_METHOD: Deduce if mentioned (e.g., 'Credit Card', 'UPI', 'SBI', 'Bank'). Default to 'Cash/UPI'.\n"
         "5. CATEGORY & SUBCATEGORY: Logical 1-2 word deduction. NEVER use 'Unknown'.\n"
-        f"6. RECURRING DATES (CRITICAL): If recurring, you MUST output EXACTLY ONE item. DO NOT manually generate multiple items. "
-        f"Set 'frequency' (Choose ONLY from: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly', 'none'). "
-        f"Set 'date_str' to start date (default to Jan 1st of {current_year_str} if only a day like '25th' is given).\n"
-        "7. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY if user mentions moving dates for holidays or weekends.\n"
-        "8. CURRENCY FORMATS: You MUST convert string formats like '2.51l', '1.5lakhs', or '1.5l' strictly into numerical integers (e.g., 251000, 150000).\n"
-        f"9. END DATES: If the user says 'till date', 'until today', or similar, strictly set 'end_date_str' to {current_date_str}."
+        f"6. RECURRING DATES (CRITICAL): If recurring, you MUST output EXACTLY ONE item. "
+        f"Set 'frequency' (Choose ONLY from: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly', 'none').\n"
+        "7. ADJUST WEEKENDS: Set 'adjust_weekends' to true ONLY if user mentions moving dates for holidays or business days.\n"
+        "8. CURRENCY FORMATS (STRICT): 'l' or 'lakh' means EXACTLY multiply by 100,000 (e.g. '1.5l' = 150000, '2.51l' = 251000). Leave standard numbers untouched (e.g. '200' = 200).\n"
+        "9. HISTORICAL START DATES: If the user says 'Every month on 25th' without a start month, NEVER use a future date. You MUST set 'date_str' to the FIRST occurrence in the current year (e.g. Jan 25, {current_year_str}).\n"
+        "10. NO CALENDAR MATH: Do NOT attempt to calculate 'last business day'. Set the date to the EXACT calendar end (e.g. Feb 28, Jun 30) and set adjust_weekends=true. The backend will shift it."
     )
 
     try:
@@ -86,7 +86,6 @@ async def parse_expense_text(text: str) -> list:
         end_date = start_date
         freq = ext.frequency.lower().strip() if ext.frequency else 'none'
 
-        # Expanded valid frequency tracker
         valid_frequencies = ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly']
 
         if freq in valid_frequencies:
@@ -108,16 +107,16 @@ async def parse_expense_text(text: str) -> list:
         while current_date <= end_date and loops < loop_cap:
             actual_date = current_date
 
-            # Business day adjust logic (Shifts Saturdays to Friday, Sundays to Friday)
+            # Business day adjust logic
             if ext.adjust_weekends:
-                if actual_date.weekday() == 5:  # Saturday
+                if actual_date.weekday() == 5:  # Saturday -> Friday
                     actual_date -= timedelta(days=1)
-                elif actual_date.weekday() == 6:  # Sunday
+                elif actual_date.weekday() == 6:  # Sunday -> Friday
                     actual_date -= timedelta(days=2)
 
             results.append((amt, item, actual_date, cat, subcat, remarks, t_type, p_method))
 
-            # Engine Update: Complex Date-Math Engine supporting new frequencies
+            # Engine Update: Complex Date-Math
             if freq == 'daily':
                 current_date += timedelta(days=1)
             elif freq == 'weekly':
@@ -143,7 +142,6 @@ async def parse_expense_text(text: str) -> list:
                 try:
                     current_date = date(current_date.year + 1, current_date.month, current_date.day)
                 except ValueError:
-                    # Handles leap year mapping (e.g., Feb 29 to Feb 28)
                     current_date = date(current_date.year + 1, current_date.month, current_date.day - 1)
             else:
                 break
