@@ -37,7 +37,7 @@ async def parse_expense_text(raw_text: str) -> list:
 
     clean_text = preprocess_financial_text(raw_text)
 
-    # Engine Fix: Enforcing Strict Property Isolation for Booleans
+    # Engine Fix: Restored the Strict Anti-Looping Directive (Rule 5)
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
@@ -47,11 +47,11 @@ async def parse_expense_text(raw_text: str) -> list:
         "2. TRANSACTION_TYPE: Classify strictly as 'Income' or 'Expense'.\n"
         "3. PAYMENT_METHOD: Deduce if mentioned. Default to 'Cash/UPI'.\n"
         "4. CATEGORY & SUBCATEGORY: Logical 1-2 word deduction. NEVER use 'Unknown'.\n"
-        f"5. RECURRING DATES: Set 'frequency' (Choose ONLY from: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly', 'none').\n"
-        "6. STRICT BOOLEAN ISOLATION (CRITICAL): Set 'adjust_weekends' to true ONLY for the SPECIFIC items where a 'business day' or holiday shift is explicitly requested (e.g., Salary, Bonus). You MUST default to false for all other items (e.g., Milk, Groceries, standard expenses).\n"
+        f"5. RECURRING DATES (ANTI-LOOPING): You MUST output EXACTLY ONE JSON object for recurring entries. DO NOT manually generate multiple items. Set 'frequency' (Choose ONLY from: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly', 'none').\n"
+        "6. STRICT BOOLEAN ISOLATION: Set 'adjust_weekends' to true ONLY for the SPECIFIC items where a 'business day' or holiday shift is explicitly requested. You MUST default to false for all other items.\n"
         f"7. NO PAST YEARS: NEVER use a past year. ALWAYS append {current_year_str} to your date strings.\n"
         f"8. HISTORICAL ANCHORING: If the user provides a recurring item WITHOUT a specific start month, you MUST set 'date_str' to January of the current year (e.g. 'Jan 4, {current_year_str}').\n"
-        "9. NO CALENDAR MATH: Set 'date_str' to the EXACT calendar end (e.g. Feb 28, Jun 30). Do NOT attempt to calculate the business day manually."
+        "9. NO CALENDAR MATH: Set 'date_str' to the EXACT calendar end. Do NOT attempt to calculate the business day manually."
     )
 
     try:
