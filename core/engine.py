@@ -21,7 +21,6 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
         raise FinanceManagerException("Voice AI", f"Transcription Failed: {str(e)}", "Please type your entry instead.")
 
 
-# Engine Fix: Floating-Point Truncation Safety
 def preprocess_financial_text(text: str) -> str:
     """Safely handles localized currency math before the LLM sees it, preventing truncation."""
     text = re.sub(r'([\d\.]+)\s*(?:lakhs?|l)\b', lambda m: str(int(round(float(m.group(1)) * 100000))), text,
@@ -38,7 +37,7 @@ async def parse_expense_text(raw_text: str) -> list:
 
     clean_text = preprocess_financial_text(raw_text)
 
-    # Engine Fix: Reinstated Historical Anchor and strict calendar math bans.
+    # Engine Fix: Enforcing Strict Property Isolation for Booleans
     sys_prompt = (
         f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
         "Extract the financial entries into JSON with an 'items' array. "
@@ -49,10 +48,10 @@ async def parse_expense_text(raw_text: str) -> list:
         "3. PAYMENT_METHOD: Deduce if mentioned. Default to 'Cash/UPI'.\n"
         "4. CATEGORY & SUBCATEGORY: Logical 1-2 word deduction. NEVER use 'Unknown'.\n"
         f"5. RECURRING DATES: Set 'frequency' (Choose ONLY from: 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly', 'none').\n"
-        "6. ADJUST WEEKENDS (CRITICAL): If the user mentions 'business day', 'working day', or holidays, set 'adjust_weekends' to true.\n"
+        "6. STRICT BOOLEAN ISOLATION (CRITICAL): Set 'adjust_weekends' to true ONLY for the SPECIFIC items where a 'business day' or holiday shift is explicitly requested (e.g., Salary, Bonus). You MUST default to false for all other items (e.g., Milk, Groceries, standard expenses).\n"
         f"7. NO PAST YEARS: NEVER use a past year. ALWAYS append {current_year_str} to your date strings.\n"
-        f"8. HISTORICAL ANCHORING (CRITICAL): If the user provides a recurring item WITHOUT a specific start month (e.g. 'on the 4th', 'weekly on Monday', 'everyday'), you MUST set 'date_str' to January of the current year (e.g. 'Jan 4, {current_year_str}', 'Jan 1, {current_year_str}').\n"
-        "9. NO CALENDAR MATH: Set 'date_str' to the EXACT calendar end (e.g. Feb 28, Jun 30). Do NOT attempt to calculate or output the business day manually."
+        f"8. HISTORICAL ANCHORING: If the user provides a recurring item WITHOUT a specific start month, you MUST set 'date_str' to January of the current year (e.g. 'Jan 4, {current_year_str}').\n"
+        "9. NO CALENDAR MATH: Set 'date_str' to the EXACT calendar end (e.g. Feb 28, Jun 30). Do NOT attempt to calculate the business day manually."
     )
 
     try:
