@@ -4,6 +4,7 @@ import logging
 import traceback
 from fastapi import APIRouter, Request, Header, HTTPException
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from datetime import date
 
 from core.database import (
@@ -29,13 +30,11 @@ def build_delete_keyboard(records: list, page: int, total_pages: int, keyword: s
     """Renders the color-coded UI and pagination controls."""
     kb_layout = []
 
-    # 1. Render Record Buttons (White ⚪️ = Unselected)
     for record in records:
         date_str = date.fromisoformat(record['transaction_date']).strftime("%d %b")
         btn_text = f"⚪️ {date_str}: {record['item_name']} (₹{record['amount']:,.0f})"
         kb_layout.append([InlineKeyboardButton(text=btn_text, callback_data=f"del_tgl:{record['id']}")])
 
-    # 2. Render Pagination Controls
     nav_row = []
     safe_kw = (keyword[:20] if keyword else "")
 
@@ -49,7 +48,6 @@ def build_delete_keyboard(records: list, page: int, total_pages: int, keyword: s
     if nav_row:
         kb_layout.append(nav_row)
 
-    # 3. Render Action Buttons
     kb_layout.append([
         InlineKeyboardButton("🚫 Cancel", callback_data="del_ccl"),
         InlineKeyboardButton("🗑️ Confirm Deletion", callback_data="del_cfm")
@@ -88,7 +86,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                                                    transaction_date=date.fromisoformat(date_iso),
                                                    remarks="Unknown Item"))
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
-                                            text=f"  Saved: Unknown Item -  {amt} (Misc - Unknown)")
+                                            text=f"✅ Saved: Unknown Item - ₹ {amt} (Misc - Unknown)")
 
             elif data.startswith("fut:"):
                 parts = data.split(":")
@@ -97,10 +95,23 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                                                    item_name=desc_snippet,
                                                    transaction_date=date.fromisoformat(date_iso), remarks=desc_snippet))
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
-                                            text=f"  Saved Future Entry: {desc_snippet} -  {amt} ({ai_cat})")
+                                            text=f"✅ Saved Future Entry: {desc_snippet} - ₹ {amt} ({ai_cat})")
 
-            # --- PAGINATION HANDLER ---
+            # --- PAGINATION HANDLER WITH SELECTION LOCK ---
             elif data.startswith("del_pg:"):
+                # Check for unsaved selections on the current page
+                current_kb = q["message"]["reply_markup"]["inline_keyboard"]
+                has_unsaved_selections = any("🔴" in btn.get("text", "") for row in current_kb for btn in row)
+
+                if has_unsaved_selections:
+                    # Block page turn and alert the user
+                    await bot.answer_callback_query(
+                        callback_query_id=q["id"],
+                        text="⚠️ You have selected items on this page!\n\nPlease click 'Confirm Deletion' before changing pages.",
+                        show_alert=True
+                    )
+                    return {"status": "ok"}
+
                 parts = data.split(":", 2)
                 page = int(parts[1])
                 keyword = parts[2] if len(parts) > 2 and parts[2] else None
@@ -170,7 +181,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                     audio = (await c.get(
                         f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{f_info['result']['file_path']}")).content
                 text = await transcribe_audio(audio)
-                await bot.send_message(chat_id, f"  Heard: {text}")
+                await bot.send_message(chat_id, f"🎙️ Heard: {text}")
 
             if text:
                 if text.startswith("/start"):
@@ -185,9 +196,9 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         freq, emails = text.split()[1].lower(), text.split()[2]
                         supabase.table("report_schedules").insert(
                             {"telegram_id": uid, "frequency": freq, "emails": emails, "scheduled_hour": 9}).execute()
-                        await bot.send_message(chat_id, f"  Subscribed: {freq.capitalize()} to {emails}")
+                        await bot.send_message(chat_id, f"✅ Subscribed: {freq.capitalize()} to {emails}")
                     except:
-                        await bot.send_message(chat_id, "  Format: /subscribe <daily|weekly|monthly> <email>")
+                        await bot.send_message(chat_id, "⚠️ Format: /subscribe <daily|weekly|monthly> <email>")
 
                 # --- INITIAL DELETE COMMAND ROUTING ---
                 elif text.startswith("/delete"):
@@ -215,7 +226,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
 
                     if not extracted_data:
                         await bot.send_message(chat_id,
-                                               "  **Invalid Entry:** I couldn't recognize a valid expense. Please provide a clear item and amount (e.g., 'Milk 40').")
+                                               "⚠️ **Invalid Entry:** I couldn't recognize a valid expense. Please provide a clear item and amount (e.g., 'Milk 40').")
                         return {"status": "ok"}
 
                     is_bulk = len(extracted_data) > 1
@@ -237,7 +248,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                             continue
 
                         if not is_bulk and check_duplicate(uid, amt, item_name, item_date):
-                            await bot.send_message(chat_id, f"  Duplicate prevented: {item_name} -  {amt}")
+                            await bot.send_message(chat_id, f"⚠️ Duplicate prevented: {item_name} - ₹ {amt}")
                             continue
 
                         if not is_bulk and item_name == "Unknown Item":
@@ -245,7 +256,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                                                                              callback_data=f"unk:{amt}:{item_date.isoformat()}")],
                                                        [InlineKeyboardButton("No, cancel", callback_data="cancel")]])
                             await bot.send_message(chat_id,
-                                                   f"  I found an amount ( {amt}) but no item name.\nDo you want to save this anyway?",
+                                                   f"⚠️ I found an amount (₹ {amt}) but no item name.\nDo you want to save this anyway?",
                                                    reply_markup=kb)
                             continue
 
@@ -254,7 +265,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                                                                              callback_data=f"fut:{amt}:{item_name[:10]}:{item_date.isoformat()}:{ai_cat[:10]}:{ai_subcat[:10]}")],
                                                        [InlineKeyboardButton("No, cancel", callback_data="cancel")]])
                             await bot.send_message(chat_id,
-                                                   f"  Future date detected for '{item_name}': {item_date.strftime('%Y-%m-%d')}. Are you sure?",
+                                                   f"📅 Future date detected for '{item_name}': {item_date.strftime('%Y-%m-%d')}. Are you sure?",
                                                    reply_markup=kb)
                             continue
 
@@ -272,24 +283,38 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         if is_bulk:
                             bulk_records_to_save.append(record)
                             total_amt += amt
-                            saved_details.append(f"  {item_date.strftime('%d %b')}: {item_name} ( {amt:,.0f})")
+                            saved_details.append(f"• {item_date.strftime('%d %b')}: {item_name} (₹ {amt:,.0f})")
                         else:
                             save_transaction(record)
                             await bot.send_message(chat_id,
-                                                   f"  Auto-Saved: {item_name} -  {amt} ({final_cat} - {final_subcat})\n  *{t_type} via {p_method}*\n  {remarks}")
+                                                   f"✅ Auto-Saved: {item_name} - ₹ {amt} ({final_cat} - {final_subcat})\n🪙 *{t_type} via {p_method}*\n📝 {remarks}")
 
                     if is_bulk and bulk_records_to_save:
                         save_transactions_bulk(bulk_records_to_save)
-                        msg = f"  **Bulk Upload Successful!**\n  Saved: {len(bulk_records_to_save)} items\n  Total Amount:  {total_amt:,.2f}\n"
-                        if dup_count > 0: msg += f"  Ignored {dup_count} duplicate retries.\n"
-                        if future_skipped > 0: msg += f"  Skipped {future_skipped} future entries.\n"
+                        msg = f"✅ **Bulk Upload Successful!**\n📊 Saved: {len(bulk_records_to_save)} items\n💰 Total Amount: ₹ {total_amt:,.2f}\n"
+                        if dup_count > 0: msg += f"⚠️ Ignored {dup_count} duplicate retries.\n"
+                        if future_skipped > 0: msg += f"⏭️ Skipped {future_skipped} future entries.\n"
                         msg += f"\n*Preview:*\n" + "\n".join(saved_details[:15])
                         if len(saved_details) > 15: msg += f"\n... and {len(saved_details) - 15} more items."
                         await bot.send_message(chat_id, msg, parse_mode="Markdown")
 
                     elif is_bulk and dup_count > 0 and not bulk_records_to_save:
                         await bot.send_message(chat_id,
-                                               f"  Ignored bulk list. All {dup_count} items were already saved recently.")
+                                               f"⚠️ Ignored bulk list. All {dup_count} items were already saved recently.")
+
+    except BadRequest as e:
+        # GRACEFUL EXCEPTION HANDLING FOR "Message is not modified"
+        if "Message is not modified" in str(e):
+            if "callback_query" in update:
+                try:
+                    await bot.answer_callback_query(callback_query_id=update["callback_query"]["id"])
+                except:
+                    pass
+            return {"status": "ok"}
+
+        # If it's a different BadRequest, let it fall through to logging
+        tb_str = traceback.format_exc()
+        logger.error(f"Telegram BadRequest: {tb_str}")
 
     except FinanceManagerException as e:
         fault_type = "APPLICATION FAULT"
@@ -297,23 +322,25 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
             fault_type = "DATABASE FAULT"
         elif "AI" in e.step or "Voice" in e.step:
             fault_type = "AI/VENDOR FAULT"
-        error_msg = f"  **[{fault_type}]**\nNode: `{e.step}`\nDetails: `{e.message}`\nAction: {e.action}"
+        error_msg = f"🚨 **[{fault_type}]**\nNode: `{e.step}`\nDetails: `{e.message}`\nAction: {e.action}"
         if "chat_id" in locals():
             try:
                 await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
             except:
                 pass
+
     except httpx.RequestError as e:
-        error_msg = f"  **[NETWORK FAULT]**\nNode: `External API Routing`\nDetails: `{str(e)}`\nAction: Verify outbound Vercel connections. Route to DevOps."
+        error_msg = f"🚨 **[NETWORK FAULT]**\nNode: `External API Routing`\nDetails: `{str(e)}`\nAction: Verify outbound Vercel connections. Route to DevOps."
         if "chat_id" in locals():
             try:
                 await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
             except:
                 pass
+
     except Exception as e:
         tb_str = traceback.format_exc()
         logger.error(f"CRITICAL SYSTEM ERROR: {tb_str}")
-        error_msg = f"  **[APPLICATION FAULT]**\nNode: `Vercel Serverless Runtime ({e.__class__.__name__})`\nDetails: `{str(e)}`\nAction: Assign to Backend Engineering Team."
+        error_msg = f"🚨 **[APPLICATION FAULT]**\nNode: `Vercel Serverless Runtime ({e.__class__.__name__})`\nDetails: `{str(e)}`\nAction: Assign to Backend Engineering Team."
         if "chat_id" in locals():
             try:
                 await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
