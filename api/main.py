@@ -1,10 +1,12 @@
 import os
 from fastapi import FastAPI, HTTPException
 from telegram import Bot, BotCommand
+
 from api.webhook import router as webhook_router
 from api.cron import router as cron_router
 
 app = FastAPI(title="FinManPro API", docs_url=None, redoc_url=None)
+
 app.include_router(webhook_router, prefix="/api")
 app.include_router(cron_router, prefix="/api")
 
@@ -25,12 +27,13 @@ async def setup_bot():
 
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-    # Define the Native Telegram UI Menu (Chart functionality removed)
+    # Define the Native Telegram UI Menu
     commands = [
         BotCommand("start", "Welcome & Instructions"),
         BotCommand("report", "Generate Visual Dashboard & CSV Data"),
         BotCommand("statistics", "View Text-Based Expenditure Stats"),
-        BotCommand("subscribe", "Automate Reports (daily/weekly/monthly)")
+        BotCommand("subscribe", "Automate Reports (daily/weekly/monthly)"),
+        BotCommand("delete", "Delete specific transactions")
     ]
 
     try:

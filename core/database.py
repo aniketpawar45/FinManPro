@@ -37,16 +37,15 @@ def check_duplicate(user_id: str, amount: float, item_name: str, transaction_dat
 def filter_bulk_duplicates(user_id: str, extracted_data: list) -> tuple:
     try:
         sixty_sec_ago = (get_ist_now() - timedelta(seconds=60)).isoformat()
-
         # CRITICAL FIX 1: Ask DB for the transaction_date as well
         res = supabase.table("transactions").select("amount, item_name, transaction_date").eq("user_id", user_id).gt(
             "created_at", sixty_sec_ago).execute()
 
         # CRITICAL FIX 2: Create a unique signature combining Amount + Name + Date
         existing_records = {(float(r['amount']), r['item_name'].title(), r['transaction_date']) for r in res.data}
+
         unique_data = []
         dup_count = 0
-
         for data in extracted_data:
             amt, item_name, item_date = float(data[0]), data[1].title(), data[2]
             date_str = item_date.isoformat()
@@ -109,7 +108,6 @@ def get_user_stats(user_id: str) -> str:
     try:
         res = supabase.table("transactions").select("category, amount").eq("user_id", user_id).execute()
         if not res.data: return "No expenses logged."
-
         cat_map = {}
         total = 0.0
         for row in res.data:
@@ -117,9 +115,31 @@ def get_user_stats(user_id: str) -> str:
             a = float(row.get('amount', 0))
             cat_map[c] = cat_map.get(c, 0) + a
             total += a
-
-        msg = f"💰 **Total Spent: ₹{total:,.2f}**\n\n**Breakdown:**\n"
-        for c, a in sorted(cat_map.items(), key=lambda x: x[1], reverse=True): msg += f"{c}: ₹{a:,.2f}\n"
+        msg = f"💳 **Total Spent: ₹ {total:,.2f}**\n\n**Breakdown:**\n"
+        for c, a in sorted(cat_map.items(), key=lambda x: x[1], reverse=True): msg += f"{c}: ₹ {a:,.2f}\n"
         return msg
     except:
         return "Failed to fetch stats."
+
+
+def get_recent_transactions(user_id: str, limit: int = 5, keyword: str = None) -> list:
+    """Fetches recent transactions for the delete UI context."""
+    try:
+        query = supabase.table("transactions").select("id, item_name, amount, transaction_date").eq("user_id", user_id)
+        if keyword:
+            query = query.ilike("item_name", f"%{keyword}%")
+        res = query.order("transaction_date", desc=True).limit(limit).execute()
+        return res.data
+    except Exception as e:
+        logger.error(f"Failed to fetch recent transactions: {str(e)}")
+        return []
+
+
+def delete_transactions(user_id: str, transaction_ids: list[int]) -> bool:
+    """Executes a hard delete. The Supabase Trigger will handle the audit log."""
+    try:
+        if not transaction_ids: return True
+        supabase.table("transactions").delete().eq("user_id", user_id).in_("id", transaction_ids).execute()
+        return True
+    except Exception as e:
+        raise FinanceManagerException("Database", f"Delete failed: {str(e)}", "Check Supabase.")

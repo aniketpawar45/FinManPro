@@ -6,8 +6,10 @@ from fastapi import APIRouter, Request, Header, HTTPException
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from datetime import date
 
-from core.database import save_transaction, save_transactions_bulk, check_duplicate, filter_bulk_duplicates, \
-    get_last_category
+from core.database import (
+    save_transaction, save_transactions_bulk, check_duplicate, filter_bulk_duplicates,
+    get_last_category, get_recent_transactions, delete_transactions
+)
 from core.engine import parse_expense_text, transcribe_audio
 from core.models import TransactionRecord
 from core.utils import get_ist_now, FinanceManagerException
@@ -29,6 +31,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     if not bot: return {"status": "error"}
+
     update = await request.json()
 
     try:
@@ -38,7 +41,8 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
             q["data"]
 
             if data == "cancel":
-                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="❌ Entry cancelled.")
+                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="🚫 Entry cancelled.")
+
             elif data.startswith("unk:"):
                 parts = data.split(":")
                 amt, date_iso = float(parts[1]), parts[2]
@@ -47,7 +51,8 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                                                    transaction_date=date.fromisoformat(date_iso),
                                                    remarks="Unknown Item"))
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
-                                            text=f"✅ Saved: Unknown Item - ₹{amt} (Misc - Unknown)")
+                                            text=f"✅ Saved: Unknown Item - ₹ {amt} (Misc - Unknown)")
+
             elif data.startswith("fut:"):
                 parts = data.split(":")
                 amt, desc_snippet, date_iso, ai_cat, ai_subcat = float(parts[1]), parts[2], parts[3], parts[4], parts[5]
@@ -55,7 +60,45 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                                                    item_name=desc_snippet,
                                                    transaction_date=date.fromisoformat(date_iso), remarks=desc_snippet))
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
-                                            text=f"✅ Saved Future Entry: {desc_snippet} - ₹{amt} ({ai_cat})")
+                                            text=f"✅ Saved Future Entry: {desc_snippet} - ₹ {amt} ({ai_cat})")
+
+            # --- NEW: Delete UI State Handling ---
+            elif data.startswith("del_tgl:"):
+                kb = q["message"]["reply_markup"]["inline_keyboard"]
+                new_kb_layout = []
+                for row in kb:
+                    new_row = []
+                    for btn in row:
+                        c_data = btn.get("callback_data", "")
+                        text = btn.get("text", "")
+                        if c_data == data:
+                            text = text.replace("[ ]", "[x]") if "[ ]" in text else text.replace("[x]", "[ ]")
+                        new_row.append(InlineKeyboardButton(text=text, callback_data=c_data))
+                    new_kb_layout.append(new_row)
+                await bot.edit_message_reply_markup(chat_id=chat_id, message_id=msg_id,
+                                                    reply_markup=InlineKeyboardMarkup(new_kb_layout))
+
+            elif data == "del_cfm":
+                kb = q["message"]["reply_markup"]["inline_keyboard"]
+                ids_to_delete = []
+                for row in kb:
+                    for btn in row:
+                        c_data = btn.get("callback_data", "")
+                        text = btn.get("text", "")
+                        if c_data.startswith("del_tgl:") and "[x]" in text:
+                            ids_to_delete.append(int(c_data.split(":")[1]))
+
+                if not ids_to_delete:
+                    await bot.answer_callback_query(callback_query_id=q["id"], text="Please select at least one item.",
+                                                    show_alert=True)
+                    return {"status": "ok"}
+
+                delete_transactions(uid, ids_to_delete)
+                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
+                                            text=f"✅ Successfully deleted {len(ids_to_delete)} transaction(s).\n(Audit log recorded).")
+
+            elif data == "del_ccl":
+                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="🚫 Deletion workflow cancelled.")
 
         elif "message" in update:
             msg = update["message"]
@@ -90,9 +133,35 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         await bot.send_message(chat_id, f"✅ Subscribed: {freq.capitalize()} to {emails}")
                     except:
                         await bot.send_message(chat_id, "⚠️ Format: /subscribe <daily|weekly|monthly> <email>")
+
+                # --- NEW: Delete Command Routing ---
+                elif text.startswith("/delete"):
+                    keyword = text.replace("/delete", "").strip()
+                    recent_records = get_recent_transactions(uid, limit=5, keyword=keyword if keyword else None)
+
+                    if not recent_records:
+                        await bot.send_message(chat_id, "No recent transactions found.")
+                        return {"status": "ok"}
+
+                    kb_layout = []
+                    for record in recent_records:
+                        date_str = date.fromisoformat(record['transaction_date']).strftime("%d %b")
+                        btn_text = f"[ ] {date_str}: {record['item_name']} (₹{record['amount']:,.0f})"
+                        kb_layout.append([InlineKeyboardButton(text=btn_text, callback_data=f"del_tgl:{record['id']}")])
+
+                    # Add confirmation gates
+                    kb_layout.append([
+                        InlineKeyboardButton("🚫 Cancel", callback_data="del_ccl"),
+                        InlineKeyboardButton("🗑️ Confirm Deletion", callback_data="del_cfm")
+                    ])
+
+                    instruction = f"Select items to delete{' matching ' + keyword if keyword else ''}:"
+                    await bot.send_message(chat_id, instruction, reply_markup=InlineKeyboardMarkup(kb_layout))
+
                 elif text.startswith("/"):
                     await bot.send_message(chat_id, "Unknown command.")
                 else:
+                    # Proceed with existing AI parsing for normal transactions
                     await bot.send_chat_action(chat_id=chat_id, action='typing')
                     extracted_data = await parse_expense_text(text)
 
@@ -103,7 +172,6 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
 
                     is_bulk = len(extracted_data) > 1
                     dup_count = 0
-
                     if is_bulk:
                         extracted_data, dup_count = filter_bulk_duplicates(uid, extracted_data)
 
@@ -121,7 +189,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                             continue
 
                         if not is_bulk and check_duplicate(uid, amt, item_name, item_date):
-                            await bot.send_message(chat_id, f"🛡️ Duplicate prevented: {item_name} - ₹{amt}")
+                            await bot.send_message(chat_id, f"⚠️ Duplicate prevented: {item_name} - ₹ {amt}")
                             continue
 
                         if not is_bulk and item_name == "Unknown Item":
@@ -129,7 +197,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                                                                              callback_data=f"unk:{amt}:{item_date.isoformat()}")],
                                                        [InlineKeyboardButton("No, cancel", callback_data="cancel")]])
                             await bot.send_message(chat_id,
-                                                   f"⚠️ I found an amount (₹{amt}) but no item name.\nDo you want to save this anyway?",
+                                                   f"⚠️ I found an amount (₹ {amt}) but no item name.\nDo you want to save this anyway?",
                                                    reply_markup=kb)
                             continue
 
@@ -138,7 +206,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                                                                              callback_data=f"fut:{amt}:{item_name[:10]}:{item_date.isoformat()}:{ai_cat[:10]}:{ai_subcat[:10]}")],
                                                        [InlineKeyboardButton("No, cancel", callback_data="cancel")]])
                             await bot.send_message(chat_id,
-                                                   f"⏳ Future date detected for '{item_name}': {item_date.strftime('%Y-%m-%d')}. Are you sure?",
+                                                   f"📅 Future date detected for '{item_name}': {item_date.strftime('%Y-%m-%d')}. Are you sure?",
                                                    reply_markup=kb)
                             continue
 
@@ -156,25 +224,24 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
                         if is_bulk:
                             bulk_records_to_save.append(record)
                             total_amt += amt
-                            saved_details.append(f"• {item_date.strftime('%d %b')}: {item_name} (₹{amt:,.0f})")
+                            saved_details.append(f"• {item_date.strftime('%d %b')}: {item_name} (₹ {amt:,.0f})")
                         else:
                             save_transaction(record)
                             await bot.send_message(chat_id,
-                                                   f"🤖 Auto-Saved: {item_name} - ₹{amt} ({final_cat} - {final_subcat})\n💳 *{t_type} via {p_method}*\n📝 {remarks}")
+                                                   f"✅ Auto-Saved: {item_name} - ₹ {amt} ({final_cat} - {final_subcat})\n🪙 *{t_type} via {p_method}*\n📝 {remarks}")
 
                     if is_bulk and bulk_records_to_save:
                         save_transactions_bulk(bulk_records_to_save)
-                        msg = f"✅ **Bulk Upload Successful!**\n💾 Saved: {len(bulk_records_to_save)} items\n💰 Total Amount: ₹{total_amt:,.2f}\n"
-                        if dup_count > 0: msg += f"🛡️ Ignored {dup_count} duplicate retries.\n"
+                        msg = f"✅ **Bulk Upload Successful!**\n📊 Saved: {len(bulk_records_to_save)} items\n💰 Total Amount: ₹ {total_amt:,.2f}\n"
+                        if dup_count > 0: msg += f"⚠️ Ignored {dup_count} duplicate retries.\n"
                         if future_skipped > 0: msg += f"⏭️ Skipped {future_skipped} future entries.\n"
-
                         msg += f"\n*Preview:*\n" + "\n".join(saved_details[:15])
                         if len(saved_details) > 15: msg += f"\n... and {len(saved_details) - 15} more items."
                         await bot.send_message(chat_id, msg, parse_mode="Markdown")
 
                     elif is_bulk and dup_count > 0 and not bulk_records_to_save:
                         await bot.send_message(chat_id,
-                                               f"🛡️ Ignored bulk list. All {dup_count} items were already saved recently.")
+                                               f"⚠️ Ignored bulk list. All {dup_count} items were already saved recently.")
 
     except FinanceManagerException as e:
         fault_type = "APPLICATION FAULT"
@@ -182,14 +249,14 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
             fault_type = "DATABASE FAULT"
         elif "AI" in e.step or "Voice" in e.step:
             fault_type = "AI/VENDOR FAULT"
-        error_msg = f"❌ **[{fault_type}]**\nNode: `{e.step}`\nDetails: `{e.message}`\nAction: {e.action}"
+        error_msg = f"🚨 **[{fault_type}]**\nNode: `{e.step}`\nDetails: `{e.message}`\nAction: {e.action}"
         if "chat_id" in locals():
             try:
                 await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
             except:
                 pass
     except httpx.RequestError as e:
-        error_msg = f"❌ **[NETWORK FAULT]**\nNode: `External API Routing`\nDetails: `{str(e)}`\nAction: Verify outbound Vercel connections. Route to DevOps."
+        error_msg = f"🚨 **[NETWORK FAULT]**\nNode: `External API Routing`\nDetails: `{str(e)}`\nAction: Verify outbound Vercel connections. Route to DevOps."
         if "chat_id" in locals():
             try:
                 await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
@@ -198,7 +265,7 @@ async def handle_webhook(request: Request, x_telegram_bot_api_secret_token: str 
     except Exception as e:
         tb_str = traceback.format_exc()
         logger.error(f"CRITICAL SYSTEM ERROR: {tb_str}")
-        error_msg = f"❌ **[APPLICATION FAULT]**\nNode: `Vercel Serverless Runtime ({e.__class__.__name__})`\nDetails: `{str(e)}`\nAction: Assign to Backend Engineering Team."
+        error_msg = f"🚨 **[APPLICATION FAULT]**\nNode: `Vercel Serverless Runtime ({e.__class__.__name__})`\nDetails: `{str(e)}`\nAction: Assign to Backend Engineering Team."
         if "chat_id" in locals():
             try:
                 await bot.send_message(chat_id, error_msg, parse_mode="Markdown")
