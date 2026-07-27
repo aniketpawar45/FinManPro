@@ -13,7 +13,8 @@ from core.utils import get_ist_now, FinanceManagerException, IST_TZ
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-api_semaphore = asyncio.Semaphore(3)
+# Throttle concurrency to prevent overwhelming the connection pool
+api_semaphore = asyncio.Semaphore(4)
 
 
 async def transcribe_audio(audio_bytes: bytes) -> str:
@@ -42,12 +43,11 @@ async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
                 model="llama-3.1-8b-instant",
                 response_format={"type": "json_object"},
                 temperature=0.0,
-                max_tokens=1200
+                max_tokens=500  # Tuned strictly to prevent JSON 400 errors while avoiding 429 TPM limits
             )
         except APIStatusError as e:
             if e.status_code == 429:
-                raise FinanceManagerException("AI Rate Limit", "Groq Free Tier TPM Limit reached.",
-                                              "Wait 60 seconds and try again.")
+                raise FinanceManagerException("AI Rate Limit", "API Free Tier Limit hit.", "Please wait 60 seconds.")
             raise FinanceManagerException("AI Processing", f"API Error: {str(e)}", "Check Groq integration.")
         except Exception as e:
             raise FinanceManagerException("AI Processing", f"Unknown Error: {str(e)}", "Wait 60 seconds and try again.")
@@ -57,15 +57,12 @@ async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
             raise FinanceManagerException("AI Capacity", "Chunk truncated.", "List density too high.")
 
         raw_json = res.choices[0].message.content
-
-        # CRITICAL FIX: Regex sanitization to strip LLM-generated trailing commas before parsing
         sanitized_json = re.sub(r',\s*([\]}])', r'\1', raw_json)
 
         try:
             data = json.loads(sanitized_json)
             return data.get("items", [])
         except json.JSONDecodeError as e:
-            # Expose the broken string in the UI if it fails again
             snippet = raw_json.strip()[:100].replace('\n', ' ')
             raise FinanceManagerException("AI Parsing Fault", f"Invalid JSON syntax: {str(e)}",
                                           f"Output snippet: {snippet}...")
@@ -78,7 +75,6 @@ async def parse_expense_text(raw_text: str) -> list:
     current_year_str = get_ist_now().strftime("%Y")
     clean_text = preprocess_financial_text(raw_text)
 
-    # CRITICAL FIX: Explicitly forbidding trailing commas in the prompt
     sys_prompt = (
         "Extract financial data into a compressed JSON array of arrays EXACTLY matching this format: "
         "{\"items\": [[amount(float), \"item_name\", \"date_str\" or \"\", \"category\", \"subcategory\", \"remarks\", \"Income\"|\"Expense\", \"payment_method\", \"frequency\", adjust_weekends(bool)]]}. "
@@ -88,13 +84,23 @@ async def parse_expense_text(raw_text: str) -> list:
 
     lines = [line.strip() for line in clean_text.split('\n') if line.strip() and re.search(r'\d', line)]
 
-    CHUNK_SIZE = 15
+    CHUNK_SIZE = 12
     chunks = []
     for i in range(0, len(lines), CHUNK_SIZE):
         chunks.append("\n".join(lines[i:i + CHUNK_SIZE]))
 
     if not chunks:
         chunks = [clean_text]
+
+    # THE HARD CUTOFF: Vercel + Free Tier LLM Protection
+    # 8 chunks * 500 max_tokens = 4000 output tokens + ~1000 input tokens = 5000 TPM (Safe).
+    # Anything higher than 8 chunks risks hitting the 6000 TPM limit and crashing.
+    if len(chunks) > 8:
+        raise FinanceManagerException(
+            "List Too Massive",
+            "Your list exceeds the 6,000 Tokens-Per-Minute limit of our Free AI tier.",
+            "Please split your message in half and send them 60 seconds apart."
+        )
 
     tasks = [_process_chunk(chunk, sys_prompt) for chunk in chunks]
     chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
