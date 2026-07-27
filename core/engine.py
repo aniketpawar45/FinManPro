@@ -13,7 +13,7 @@ from core.utils import get_ist_now, FinanceManagerException, IST_TZ
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-# Throttle concurrency to prevent overwhelming the connection pool
+# Throttle concurrency to prevent overwhelming the connection pool (6000 TPM limit)
 api_semaphore = asyncio.Semaphore(4)
 
 
@@ -28,10 +28,19 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 
 
 def preprocess_financial_text(text: str) -> str:
-    text = re.sub(r'([\d\.]+)\s*(?:lakhs?|l)\b', lambda m: str(int(round(float(m.group(1)) * 100000))), text,
+    """Safely handles localized currency math without colliding with units of measurement (Litres, Kg, Meters)."""
+    # 1. Full words (Lakhs, Thousands, Crores) - Spaces allowed
+    text = re.sub(r'([\d\.]+)\s*(?:crores?|cr)\b', lambda m: str(int(round(float(m.group(1)) * 10000000))), text,
                   flags=re.IGNORECASE)
-    text = re.sub(r'([\d\.]+)\s*(?:k|thousands?)\b', lambda m: str(int(round(float(m.group(1)) * 1000))), text,
+    text = re.sub(r'([\d\.]+)\s*(?:lakhs?)\b', lambda m: str(int(round(float(m.group(1)) * 100000))), text,
                   flags=re.IGNORECASE)
+    text = re.sub(r'([\d\.]+)\s*(?:thousands?)\b', lambda m: str(int(round(float(m.group(1)) * 1000))), text,
+                  flags=re.IGNORECASE)
+
+    # 2. Shorthand (k, l) - NO SPACES ALLOWED to prevent metric collisions (e.g., "2 L" = Litres, "2L" = Lakhs)
+    text = re.sub(r'([\d\.]+)(l)\b', lambda m: str(int(round(float(m.group(1)) * 100000))), text, flags=re.IGNORECASE)
+    text = re.sub(r'([\d\.]+)(k)\b', lambda m: str(int(round(float(m.group(1)) * 1000))), text, flags=re.IGNORECASE)
+
     return text
 
 
@@ -57,6 +66,8 @@ async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
             raise FinanceManagerException("AI Capacity", "Chunk truncated.", "List density too high.")
 
         raw_json = res.choices[0].message.content
+
+        # Strip LLM-generated trailing commas before parsing to avoid python JSONDecodeError
         sanitized_json = re.sub(r',\s*([\]}])', r'\1', raw_json)
 
         try:
