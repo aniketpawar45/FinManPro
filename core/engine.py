@@ -5,7 +5,7 @@ import dateparser
 import re
 from datetime import timedelta, date
 
-from groq import AsyncGroq
+from groq import AsyncGroq, APIStatusError
 from core.models import ExpenseBatch
 from core.utils import get_ist_now, FinanceManagerException, IST_TZ
 
@@ -33,27 +33,32 @@ def preprocess_financial_text(text: str) -> str:
 
 
 async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
-    """Helper method to process individual chunks asynchronously."""
+    """Helper method to process individual chunks with optimized token limits."""
     try:
         res = await client.chat.completions.create(
             messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": chunk_text}],
             model="llama-3.1-8b-instant",
             response_format={"type": "json_object"},
             temperature=0.0,
-            max_tokens=4000
+            max_tokens=800  # CRITICAL FIX: Drastically lowered to avoid hitting the 6000 TPM Free Tier Limit
         )
+    except APIStatusError as e:
+        if e.status_code == 429:
+            raise FinanceManagerException("AI Rate Limit", "Groq Free Tier TPM Limit reached due to massive list.",
+                                          "Please upload half the list now, and the other half in 60 seconds.")
+        raise FinanceManagerException("AI Processing", f"API Error: {str(e)}", "Check Groq integration.")
     except Exception as e:
-        raise FinanceManagerException("AI Processing", f"Groq API Error: {str(e)}", "Wait 60 seconds and try again.")
+        raise FinanceManagerException("AI Processing", f"Unknown Error: {str(e)}", "Wait 60 seconds and try again.")
 
     finish_reason = res.choices[0].finish_reason
     if finish_reason in ["length", "max_tokens"]:
-        raise FinanceManagerException("AI Capacity Limit", "Chunk too massive. Truncated.", "  ROLLBACK INITIATED.")
+        raise FinanceManagerException("AI Capacity", "Chunk truncated.", "List density too high.")
 
     try:
         batch = ExpenseBatch.model_validate_json(res.choices[0].message.content)
         return batch.items
     except Exception:
-        raise FinanceManagerException("AI Parsing Fault", "Corrupted JSON.", "  ROLLBACK INITIATED.")
+        raise FinanceManagerException("AI Parsing Fault", "Corrupted JSON output.", "Please retry.")
 
 
 async def parse_expense_text(raw_text: str) -> list:
@@ -63,31 +68,17 @@ async def parse_expense_text(raw_text: str) -> list:
     current_year_str = get_ist_now().strftime("%Y")
     clean_text = preprocess_financial_text(raw_text)
 
-    # PRODUCTION FIX: Dual One-Shot JSON Injection & Strict Contextual Boundaries
+    # CRITICAL FIX: Ultra-minified system prompt to save thousands of input tokens per minute
     sys_prompt = (
-        f"You are a strict financial extraction AI. TODAY'S DATE IS {current_date_str}. "
-        "Extract the financial entries into JSON with an 'items' array. "
-        "Each object must have: amount, item_name, date_str, category, subcategory, remarks, transaction_type, payment_method, frequency, end_date_str, adjust_weekends. "
-        "CRITICAL RULES:\n"
-        "1. EXACT AMOUNTS (ZERO MATH): Extract the number EXACTLY as written. If the user says '70', output 70. DO NOT multiply, add, or calculate totals.\n"
-        "2. ONE-TIME vs RECURRING: 'This month' or 'today' implies a ONE-TIME event (frequency: 'none'). 'Every month' or 'monthly' implies a RECURRING event.\n"
-        "3. STRICT BOOLEAN ISOLATION: Set 'adjust_weekends' to true ONLY if 'business day' or 'holiday' shift is explicitly requested for THAT specific item.\n"
-        f"4. HISTORICAL ANCHORING: ONLY if the user says 'EVERY [period]' (like 'every month') WITHOUT a start month, anchor 'date_str' to January of {current_year_str}. If they say 'THIS month', use the current date ({current_date_str}).\n"
-        f"5. NO PAST YEARS: ALWAYS append {current_year_str} to your date strings.\n"
-        "6. NO CALENDAR MATH: Output exact calendar dates (e.g. Feb 28). The backend will handle weekend shifts.\n\n"
-        "MANDATORY EXAMPLES:\n"
-        "User: \"Tea 70 for this month\"\n"
-        f"Output: {{\n  \"items\": [\n    {{\"amount\": 70, \"item_name\": \"Tea\", \"date_str\": \"{current_date_str}\", \"frequency\": \"none\", \"adjust_weekends\": false, \"transaction_type\": \"Expense\", \"payment_method\": \"Cash/UPI\", \"category\": \"Dining\", \"subcategory\": \"Beverages\"}}\n  ]\n}}\n\n"
-        "User: \"Salary 2.51l on 25th shift to business day\"\n"
-        f"Output: {{\n  \"items\": [\n    {{\"amount\": 251000, \"item_name\": \"Salary\", \"date_str\": \"Jan 25, {current_year_str}\", \"frequency\": \"monthly\", \"adjust_weekends\": true, \"transaction_type\": \"Income\", \"payment_method\": \"Bank\", \"category\": \"Income\", \"subcategory\": \"Salary\"}}\n  ]\n}}"
+        f"Extract financial data into JSON: {{\"items\": [{{amount:float, item_name:str, date_str:str, category:str, subcategory:str, remarks:str, transaction_type:\"Income\"|\"Expense\", payment_method:str, frequency:str, adjust_weekends:bool}}]}}. "
+        f"TODAY: {current_date_str}, YEAR: {current_year_str}. "
+        "RULES: Exact amounts only. Output precise calendar dates. Anchor missing dates to current year."
     )
 
-    # --- NEW: PARALLEL CHUNKING LOGIC ---
-    # Break the massive text into logical line-by-line arrays
-    lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
+    lines = [line.strip() for line in clean_text.split('\n') if line.strip() and re.search(r'\d', line)]
 
-    # Bundle into chunks of 20 items to guarantee we stay below the 4000 token output limit per thread
-    CHUNK_SIZE = 20
+    # Bundle into chunks of 25 items to minimize parallel thread count
+    CHUNK_SIZE = 25
     chunks = []
     for i in range(0, len(lines), CHUNK_SIZE):
         chunks.append("\n".join(lines[i:i + CHUNK_SIZE]))
@@ -99,16 +90,14 @@ async def parse_expense_text(raw_text: str) -> list:
     tasks = [_process_chunk(chunk, sys_prompt) for chunk in chunks]
     chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Merge results and enforce fail-safes
     all_extracted_items = []
     for res in chunk_results:
         if isinstance(res, Exception):
-            raise res  # Stop the entire transaction if any chunk fails to prevent partial data loss
+            raise res  # Stop the entire transaction and alert user if rate limit is hit
         all_extracted_items.extend(res)
 
     results = []
 
-    # Process the aggregated items identically to the legacy engine
     for ext in all_extracted_items:
         amt = ext.amount if ext.amount else 0.0
         item = str(ext.item_name).title().strip() if ext.item_name else "Unknown Item"
@@ -172,9 +161,9 @@ async def parse_expense_text(raw_text: str) -> list:
         while current_date <= end_date and loops < loop_cap:
             actual_date = current_date
             if ext.adjust_weekends:
-                if actual_date.weekday() == 5:  # Saturday -> Friday
+                if actual_date.weekday() == 5:
                     actual_date -= timedelta(days=1)
-                elif actual_date.weekday() == 6:  # Sunday -> Friday
+                elif actual_date.weekday() == 6:
                     actual_date -= timedelta(days=2)
 
             results.append((amt, item, actual_date, cat, subcat, remarks, t_type, p_method))
