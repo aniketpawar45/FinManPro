@@ -3,10 +3,10 @@ import asyncio
 import calendar
 import dateparser
 import re
+import json
 from datetime import timedelta, date
 
 from groq import AsyncGroq, APIStatusError
-from core.models import ExpenseBatch
 from core.utils import get_ist_now, FinanceManagerException, IST_TZ
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -33,19 +33,19 @@ def preprocess_financial_text(text: str) -> str:
 
 
 async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
-    """Helper method to process individual chunks with optimized token limits."""
+    """Helper method to process individual chunks with extreme token compression."""
     try:
         res = await client.chat.completions.create(
             messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": chunk_text}],
             model="llama-3.1-8b-instant",
             response_format={"type": "json_object"},
             temperature=0.0,
-            max_tokens=800  # CRITICAL FIX: Drastically lowered to avoid hitting the 6000 TPM Free Tier Limit
+            max_tokens=800
         )
     except APIStatusError as e:
         if e.status_code == 429:
-            raise FinanceManagerException("AI Rate Limit", "Groq Free Tier TPM Limit reached due to massive list.",
-                                          "Please upload half the list now, and the other half in 60 seconds.")
+            raise FinanceManagerException("AI Rate Limit", "Groq Free Tier TPM Limit reached.",
+                                          "Please upload half the list now, and the rest in 60 seconds.")
         raise FinanceManagerException("AI Processing", f"API Error: {str(e)}", "Check Groq integration.")
     except Exception as e:
         raise FinanceManagerException("AI Processing", f"Unknown Error: {str(e)}", "Wait 60 seconds and try again.")
@@ -55,10 +55,11 @@ async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
         raise FinanceManagerException("AI Capacity", "Chunk truncated.", "List density too high.")
 
     try:
-        batch = ExpenseBatch.model_validate_json(res.choices[0].message.content)
-        return batch.items
+        # Bypass Pydantic for raw array parsing to save tokens
+        data = json.loads(res.choices[0].message.content)
+        return data.get("items", [])
     except Exception:
-        raise FinanceManagerException("AI Parsing Fault", "Corrupted JSON output.", "Please retry.")
+        raise FinanceManagerException("AI Parsing Fault", "Corrupted JSON array output.", "Please retry.")
 
 
 async def parse_expense_text(raw_text: str) -> list:
@@ -68,17 +69,18 @@ async def parse_expense_text(raw_text: str) -> list:
     current_year_str = get_ist_now().strftime("%Y")
     clean_text = preprocess_financial_text(raw_text)
 
-    # CRITICAL FIX: Ultra-minified system prompt to save thousands of input tokens per minute
+    # CRITICAL FIX: Extreme token compression prompt. Returns raw arrays instead of objects.
     sys_prompt = (
-        f"Extract financial data into JSON: {{\"items\": [{{amount:float, item_name:str, date_str:str, category:str, subcategory:str, remarks:str, transaction_type:\"Income\"|\"Expense\", payment_method:str, frequency:str, adjust_weekends:bool}}]}}. "
+        "Extract financial data into a compressed JSON array of arrays EXACTLY matching this format: "
+        "{\"items\": [[amount(float), \"item_name\", \"date_str\" or \"\", \"category\", \"subcategory\", \"remarks\", \"Income\"|\"Expense\", \"payment_method\", \"frequency\", adjust_weekends(bool)]]}. "
         f"TODAY: {current_date_str}, YEAR: {current_year_str}. "
-        "RULES: Exact amounts only. Output precise calendar dates. Anchor missing dates to current year."
+        "RULES: Exact amounts only. DO NOT output JSON keys, only the array values in the exact order specified above. Use empty strings for missing text data."
     )
 
     lines = [line.strip() for line in clean_text.split('\n') if line.strip() and re.search(r'\d', line)]
 
-    # Bundle into chunks of 25 items to minimize parallel thread count
-    CHUNK_SIZE = 25
+    # Bundle into chunks of 30 items. (30 items * 15 tokens = ~450 output tokens, safely under the 800 limit)
+    CHUNK_SIZE = 30
     chunks = []
     for i in range(0, len(lines), CHUNK_SIZE):
         chunks.append("\n".join(lines[i:i + CHUNK_SIZE]))
@@ -90,32 +92,43 @@ async def parse_expense_text(raw_text: str) -> list:
     tasks = [_process_chunk(chunk, sys_prompt) for chunk in chunks]
     chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    all_extracted_items = []
+    all_extracted_arrays = []
     for res in chunk_results:
         if isinstance(res, Exception):
-            raise res  # Stop the entire transaction and alert user if rate limit is hit
-        all_extracted_items.extend(res)
+            raise res
+        all_extracted_arrays.extend(res)
 
     results = []
 
-    for ext in all_extracted_items:
-        amt = ext.amount if ext.amount else 0.0
-        item = str(ext.item_name).title().strip() if ext.item_name else "Unknown Item"
+    for ext in all_extracted_arrays:
+        # Safety pad the array in case the AI missed a column
+        while len(ext) < 10:
+            ext.append(False if len(ext) == 9 else "")
+
+        try:
+            amt = float(ext[0]) if ext[0] else 0.0
+        except (ValueError, TypeError):
+            amt = 0.0
+
+        item = str(ext[1]).title().strip() if ext[1] else "Unknown Item"
         if item in [str(amt), str(int(amt)), "", "Unknown Item"]: item = "Unknown Item"
-        cat = ext.category.title().strip() if ext.category else "Misc"
-        subcat = ext.subcategory.title().strip() if ext.subcategory else "General"
+
+        date_str = str(ext[2]).strip() if ext[2] else None
+        cat = str(ext[3]).title().strip() if ext[3] else "Misc"
+        subcat = str(ext[4]).title().strip() if ext[4] else "General"
         if subcat.lower() == "unknown": subcat = "General"
-        remarks = ext.remarks.strip() if ext.remarks else item
-        t_type = ext.transaction_type.title().strip()
-        p_method = ext.payment_method.title().strip()
+        remarks = str(ext[5]).strip() if ext[5] else item
+        t_type = str(ext[6]).title().strip() if ext[6] else "Expense"
+        if t_type not in ["Income", "Expense"]: t_type = "Expense"
+        p_method = str(ext[7]).title().strip() if ext[7] else "Cash/Upi"
+        freq = str(ext[8]).lower().strip() if ext[8] else "none"
+        adjust_weekends = bool(ext[9])
 
         today_date = get_ist_now().date()
         start_date = today_date
-        freq = ext.frequency.lower().strip() if ext.frequency else 'none'
 
-        if ext.date_str:
-            p_date = dateparser.parse(ext.date_str,
-                                      settings={'TIMEZONE': 'Asia/Kolkata', 'RELATIVE_BASE': get_ist_now()})
+        if date_str:
+            p_date = dateparser.parse(date_str, settings={'TIMEZONE': 'Asia/Kolkata', 'RELATIVE_BASE': get_ist_now()})
             if p_date:
                 start_date = (IST_TZ.localize(p_date) if p_date.tzinfo is None else p_date).date()
                 if start_date.year < today_date.year:
@@ -137,21 +150,7 @@ async def parse_expense_text(raw_text: str) -> list:
         valid_frequencies = ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly']
 
         if freq in valid_frequencies:
-            if ext.end_date_str:
-                p_end = dateparser.parse(ext.end_date_str,
-                                         settings={'TIMEZONE': 'Asia/Kolkata', 'RELATIVE_BASE': get_ist_now()})
-                if p_end:
-                    end_date = (IST_TZ.localize(p_end) if p_end.tzinfo is None else p_end).date()
-                    if end_date.year < today_date.year:
-                        try:
-                            end_date = end_date.replace(year=today_date.year)
-                        except ValueError:
-                            pass
-            else:
-                end_date = today_date
-            if end_date > today_date:
-                end_date = today_date
-
+            end_date = today_date
         if end_date < start_date: end_date = start_date
 
         current_date = start_date
@@ -160,7 +159,7 @@ async def parse_expense_text(raw_text: str) -> list:
 
         while current_date <= end_date and loops < loop_cap:
             actual_date = current_date
-            if ext.adjust_weekends:
+            if adjust_weekends:
                 if actual_date.weekday() == 5:
                     actual_date -= timedelta(days=1)
                 elif actual_date.weekday() == 6:
