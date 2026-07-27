@@ -5,9 +5,8 @@ import dateparser
 import re
 import json
 from datetime import timedelta, date
-
 from groq import AsyncGroq, APIStatusError
-from core.models import ExpenseBatch
+from core.models import ExpenseBatch, ExpenseExtraction
 from core.utils import get_ist_now, FinanceManagerException, IST_TZ
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -20,8 +19,10 @@ api_semaphore = asyncio.Semaphore(4)
 async def transcribe_audio(audio_bytes: bytes) -> str:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
     try:
-        res = await client.audio.transcriptions.create(file=("voice.ogg", audio_bytes, "audio/ogg"),
-                                                       model="whisper-large-v3")
+        res = await client.audio.transcriptions.create(
+            file=("voice.ogg", audio_bytes, "audio/ogg"),
+            model="whisper-large-v3"
+        )
         return res.text.strip()
     except Exception as e:
         raise FinanceManagerException("Voice AI", f"Transcription Failed: {str(e)}", "Please type your entry instead.")
@@ -35,10 +36,8 @@ def preprocess_financial_text(text: str) -> str:
                   flags=re.IGNORECASE)
     text = re.sub(r'([\d\.]+)\s*(?:thousands?)\b', lambda m: str(int(round(float(m.group(1)) * 1000))), text,
                   flags=re.IGNORECASE)
-
     text = re.sub(r'([\d\.]+)(l)\b', lambda m: str(int(round(float(m.group(1)) * 100000))), text, flags=re.IGNORECASE)
     text = re.sub(r'([\d\.]+)(k)\b', lambda m: str(int(round(float(m.group(1)) * 1000))), text, flags=re.IGNORECASE)
-
     return text
 
 
@@ -50,7 +49,7 @@ async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
                 model="llama-3.1-8b-instant",
                 response_format={"type": "json_object"},
                 temperature=0.0,
-                max_tokens=500
+                max_tokens=600
             )
         except APIStatusError as e:
             if e.status_code == 429:
@@ -65,38 +64,60 @@ async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
 
         raw_json = res.choices[0].message.content
         sanitized_json = re.sub(r',\s*([\]}])', r'\1', raw_json)
-
         try:
             data = json.loads(sanitized_json)
-            return data.get("items", [])
-        except json.JSONDecodeError as e:
-            snippet = raw_json.strip()[:100].replace('\n', ' ')
-            raise FinanceManagerException("AI Parsing Fault", f"Invalid JSON syntax: {str(e)}",
-                                          f"Output snippet: {snippet}...")
+            # Validate via Pydantic model for enterprise safety and type correctness
+            batch = ExpenseBatch.model_validate(data)
+            return [
+                [
+                    item.amount,
+                    item.item_name,
+                    item.date_str or "",
+                    item.category,
+                    item.subcategory,
+                    item.remarks,
+                    item.transaction_type,
+                    item.payment_method,
+                    item.frequency,
+                    item.adjust_weekends
+                ]
+                for item in batch.items
+            ]
+        except Exception as e:
+            try:
+                data = json.loads(sanitized_json)
+                return data.get("items", [])
+            except Exception as inner_e:
+                snippet = raw_json.strip()[:100].replace('\n', ' ')
+                raise FinanceManagerException("AI Parsing Fault", f"Invalid JSON syntax / validation error: {str(e)}",
+                                              f"Output snippet: {snippet}...")
 
 
 async def parse_expense_text(raw_text: str) -> list:
     if not client: raise FinanceManagerException("AI", "Groq API Key missing", "Set Env Var")
-
     current_date_str = get_ist_now().strftime("%B %d, %Y")
     current_year_str = get_ist_now().strftime("%Y")
     clean_text = preprocess_financial_text(raw_text)
 
-    # CRITICAL FIX: Explicitly instructing the AI to isolate the final price and ignore quantities
     sys_prompt = (
-        "Extract financial data into a compressed JSON array of arrays EXACTLY matching this format: "
-        "{\"items\": [[amount(float), \"item_name\", \"date_str\" or \"\", \"category\", \"subcategory\", \"remarks\", \"Income\"|\"Expense\", \"payment_method\", \"frequency\", adjust_weekends(bool)]]}. "
+        "You are an enterprise financial extraction engine for FinManPro. "
+        "Extract financial data into a JSON object with key 'items' containing an array of objects matching the ExpenseBatch schema. "
+        "Each object must have: amount (float), item_name (string), date_str (string or null), end_date_str (string or null), "
+        "frequency (string: 'none', 'daily', 'weekly', 'monthly', etc.), adjust_weekends (boolean), "
+        "category (string, MUST BE ONE OF: 'Groceries', 'Transport', 'Utilities', 'Dining', 'Shopping', 'Rent', 'Entertainment', 'Medical', 'Other'), "
+        "subcategory (string), remarks (string), transaction_type ('Income' or 'Expense'), payment_method (string). "
         f"TODAY: {current_date_str}, YEAR: {current_year_str}. "
-        "RULES: 1. Extract ONLY the final price. Ignore quantities (e.g., 'Item - 2 - 250' -> amount is 250). 2. DO NOT output JSON keys inside arrays. 3. NO TRAILING COMMAS allowed."
+        "RULES: 1. Extract ONLY the final price. Ignore quantities (e.g., 'Item - 2 - 250' -> amount is 250). "
+        "2. Strictly classify categories into the authorized taxonomy list. "
+        "3. EXAMPLE INPUT: 'Paid 500 for groceries at supermarket yesterday via UPI' "
+        "EXAMPLE OUTPUT: {\"items\": [{\"amount\": 500.0, \"item_name\": \"Supermarket Groceries\", \"date_str\": \"yesterday\", \"end_date_str\": null, \"frequency\": \"none\", \"adjust_weekends\": false, \"category\": \"Groceries\", \"subcategory\": \"Supermarket\", \"remarks\": \"Supermarket Groceries\", \"transaction_type\": \"Expense\", \"payment_method\": \"UPI\"}]}"
     )
 
     lines = [line.strip() for line in clean_text.split('\n') if line.strip() and re.search(r'\d', line)]
-
     CHUNK_SIZE = 12
     chunks = []
     for i in range(0, len(lines), CHUNK_SIZE):
         chunks.append("\n".join(lines[i:i + CHUNK_SIZE]))
-
     if not chunks:
         chunks = [clean_text]
 
@@ -117,33 +138,31 @@ async def parse_expense_text(raw_text: str) -> list:
         all_extracted_arrays.extend(res)
 
     results = []
-
     for ext in all_extracted_arrays:
         while len(ext) < 10:
             ext.append(False if len(ext) == 9 else "")
-
         try:
             amt = float(ext[0]) if ext[0] else 0.0
         except (ValueError, TypeError):
             amt = 0.0
-
         item = str(ext[1]).title().strip() if ext[1] else "Unknown Item"
         if item in [str(amt), str(int(amt)), "", "Unknown Item"]: item = "Unknown Item"
-
         date_str = str(ext[2]).strip() if ext[2] else None
-        cat = str(ext[3]).title().strip() if ext[3] else "Misc"
+        cat = str(ext[3]).title().strip() if ext[3] else "Other"
+        if cat not in ['Groceries', 'Transport', 'Utilities', 'Dining', 'Shopping', 'Rent', 'Entertainment', 'Medical',
+                       'Other']:
+            cat = "Other"
         subcat = str(ext[4]).title().strip() if ext[4] else "General"
         if subcat.lower() == "unknown": subcat = "General"
         remarks = str(ext[5]).strip() if ext[5] else item
         t_type = str(ext[6]).title().strip() if ext[6] else "Expense"
         if t_type not in ["Income", "Expense"]: t_type = "Expense"
-        p_method = str(ext[7]).title().strip() if ext[7] else "Cash/Upi"
+        p_method = str(ext[7]).title().strip() if ext[7] else "Cash/UPI"
         freq = str(ext[8]).lower().strip() if ext[8] else "none"
         adjust_weekends = bool(ext[9])
 
         today_date = get_ist_now().date()
         start_date = today_date
-
         if date_str:
             p_date = dateparser.parse(date_str, settings={'TIMEZONE': 'Asia/Kolkata', 'RELATIVE_BASE': get_ist_now()})
             if p_date:
@@ -165,7 +184,6 @@ async def parse_expense_text(raw_text: str) -> list:
 
         end_date = start_date
         valid_frequencies = ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'half-yearly', 'yearly']
-
         if freq in valid_frequencies:
             end_date = today_date
         if end_date < start_date: end_date = start_date
@@ -173,7 +191,6 @@ async def parse_expense_text(raw_text: str) -> list:
         current_date = start_date
         loop_cap = 1000
         loops = 0
-
         while current_date <= end_date and loops < loop_cap:
             actual_date = current_date
             if adjust_weekends:
@@ -181,9 +198,7 @@ async def parse_expense_text(raw_text: str) -> list:
                     actual_date -= timedelta(days=1)
                 elif actual_date.weekday() == 6:
                     actual_date -= timedelta(days=2)
-
             results.append((amt, item, actual_date, cat, subcat, remarks, t_type, p_method))
-
             if freq == 'daily':
                 current_date += timedelta(days=1)
             elif freq == 'weekly':
@@ -213,5 +228,4 @@ async def parse_expense_text(raw_text: str) -> list:
             else:
                 break
             loops += 1
-
     return results
