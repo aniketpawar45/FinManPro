@@ -1,5 +1,6 @@
 import os
 import logging
+import calendar
 from datetime import timedelta, date
 from supabase import create_client, Client
 from core.models import TransactionRecord
@@ -37,11 +38,9 @@ def check_duplicate(user_id: str, amount: float, item_name: str, transaction_dat
 def filter_bulk_duplicates(user_id: str, extracted_data: list) -> tuple:
     try:
         sixty_sec_ago = (get_ist_now() - timedelta(seconds=60)).isoformat()
-        # CRITICAL FIX 1: Ask DB for the transaction_date as well
         res = supabase.table("transactions").select("amount, item_name, transaction_date").eq("user_id", user_id).gt(
             "created_at", sixty_sec_ago).execute()
 
-        # CRITICAL FIX 2: Create a unique signature combining Amount + Name + Date
         existing_records = {(float(r['amount']), r['item_name'].title(), r['transaction_date']) for r in res.data}
 
         unique_data = []
@@ -50,12 +49,10 @@ def filter_bulk_duplicates(user_id: str, extracted_data: list) -> tuple:
             amt, item_name, item_date = float(data[0]), data[1].title(), data[2]
             date_str = item_date.isoformat()
 
-            # CRITICAL FIX 3: Check against the 3-part signature (Amount + Name + Date)
             if (amt, item_name, date_str) in existing_records:
                 dup_count += 1
             else:
                 unique_data.append(data)
-                # Add this exact date to the memory so we don't duplicate it in the same list
                 existing_records.add((amt, item_name, date_str))
 
         return unique_data, dup_count
@@ -104,7 +101,6 @@ def save_transactions_bulk(records: list[TransactionRecord]) -> bool:
 
 
 def get_user_stats(user_id: str) -> str:
-    # Deprecated for UI Dashboard, but kept for legacy API safety
     try:
         res = supabase.table("transactions").select("category, amount").eq("user_id", user_id).execute()
         if not res.data: return "No expenses logged."
@@ -115,24 +111,57 @@ def get_user_stats(user_id: str) -> str:
             a = float(row.get('amount', 0))
             cat_map[c] = cat_map.get(c, 0) + a
             total += a
-        msg = f"💳 **Total Spent: ₹ {total:,.2f}**\n\n**Breakdown:**\n"
-        for c, a in sorted(cat_map.items(), key=lambda x: x[1], reverse=True): msg += f"{c}: ₹ {a:,.2f}\n"
+        msg = f"  **Total Spent:  {total:,.2f}**\n\n**Breakdown:**\n"
+        for c, a in sorted(cat_map.items(), key=lambda x: x[1], reverse=True): msg += f"{c}:  {a:,.2f}\n"
         return msg
     except:
         return "Failed to fetch stats."
 
 
-def get_recent_transactions(user_id: str, limit: int = 5, keyword: str = None) -> list:
-    """Fetches recent transactions for the delete UI context."""
+def get_recent_transactions(user_id: str, limit: int = 5, offset: int = 0, keyword: str = None) -> tuple[list, int]:
+    """Fetches paginated transactions for the delete UI context, with intelligent month parsing."""
     try:
-        query = supabase.table("transactions").select("id, item_name, amount, transaction_date").eq("user_id", user_id)
+        query = supabase.table("transactions").select("id, item_name, amount, transaction_date", count="exact").eq(
+            "user_id", user_id)
+
         if keyword:
-            query = query.ilike("item_name", f"%{keyword}%")
-        res = query.order("transaction_date", desc=True).limit(limit).execute()
-        return res.data
+            kw_lower = keyword.strip().lower()
+
+            # Month lookup map to cover short names, full names, and numbers
+            month_map = {
+                'jan': 1, 'january': 1, '1': 1, '01': 1,
+                'feb': 2, 'february': 2, '2': 2, '02': 2,
+                'mar': 3, 'march': 3, '3': 3, '03': 3,
+                'apr': 4, 'april': 4, '4': 4, '04': 4,
+                'may': 5, '5': 5, '05': 5,
+                'jun': 6, 'june': 6, '6': 6, '06': 6,
+                'jul': 7, 'july': 7, '7': 7, '07': 7,
+                'aug': 8, 'august': 8, '8': 8, '08': 8,
+                'sep': 9, 'september': 9, '9': 9, '09': 9,
+                'oct': 10, 'october': 10, '10': 10,
+                'nov': 11, 'november': 11, '11': 11,
+                'dec': 12, 'december': 12, '12': 12
+            }
+
+            # If keyword is a recognized month, filter by date range instead of item name
+            if kw_lower in month_map:
+                target_month = month_map[kw_lower]
+                current_year = get_ist_now().year
+
+                start_date = date(current_year, target_month, 1)
+                end_date = date(current_year, target_month, calendar.monthrange(current_year, target_month)[1])
+
+                query = query.gte("transaction_date", start_date.isoformat()).lte("transaction_date",
+                                                                                  end_date.isoformat())
+            else:
+                # Fallback to standard item_name search
+                query = query.ilike("item_name", f"%{keyword}%")
+
+        res = query.order("transaction_date", desc=True).range(offset, offset + limit - 1).execute()
+        return res.data, res.count
     except Exception as e:
-        logger.error(f"Failed to fetch recent transactions: {str(e)}")
-        return []
+        logger.error(f"Failed to fetch paginated transactions: {str(e)}")
+        return [], 0
 
 
 def delete_transactions(user_id: str, transaction_ids: list[int]) -> bool:
