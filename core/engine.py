@@ -7,10 +7,14 @@ import json
 from datetime import timedelta, date
 
 from groq import AsyncGroq, APIStatusError
+from core.models import ExpenseBatch
 from core.utils import get_ist_now, FinanceManagerException, IST_TZ
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+# CRITICAL FIX: Throttle concurrency to max 3 simultaneous requests to protect Groq TPM Limits
+api_semaphore = asyncio.Semaphore(3)
 
 
 async def transcribe_audio(audio_bytes: bytes) -> str:
@@ -24,7 +28,7 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 
 
 def preprocess_financial_text(text: str) -> str:
-    """Safely handles localized currency math before the LLM sees it, preventing truncation."""
+    """Safely handles localized currency math before the LLM sees it."""
     text = re.sub(r'([\d\.]+)\s*(?:lakhs?|l)\b', lambda m: str(int(round(float(m.group(1)) * 100000))), text,
                   flags=re.IGNORECASE)
     text = re.sub(r'([\d\.]+)\s*(?:k|thousands?)\b', lambda m: str(int(round(float(m.group(1)) * 1000))), text,
@@ -33,33 +37,33 @@ def preprocess_financial_text(text: str) -> str:
 
 
 async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
-    """Helper method to process individual chunks with extreme token compression."""
-    try:
-        res = await client.chat.completions.create(
-            messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": chunk_text}],
-            model="llama-3.1-8b-instant",
-            response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=800
-        )
-    except APIStatusError as e:
-        if e.status_code == 429:
-            raise FinanceManagerException("AI Rate Limit", "Groq Free Tier TPM Limit reached.",
-                                          "Please upload half the list now, and the rest in 60 seconds.")
-        raise FinanceManagerException("AI Processing", f"API Error: {str(e)}", "Check Groq integration.")
-    except Exception as e:
-        raise FinanceManagerException("AI Processing", f"Unknown Error: {str(e)}", "Wait 60 seconds and try again.")
+    """Helper method to process chunks with semaphore throttling and array compression."""
+    async with api_semaphore:
+        try:
+            res = await client.chat.completions.create(
+                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": chunk_text}],
+                model="llama-3.1-8b-instant",
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=1200  # Increased to ensure JSON validates, protected by Semaphore
+            )
+        except APIStatusError as e:
+            if e.status_code == 429:
+                raise FinanceManagerException("AI Rate Limit", "Groq Free Tier TPM Limit reached.",
+                                              "Please wait 60 seconds and try again.")
+            raise FinanceManagerException("AI Processing", f"API Error: {str(e)}", "Check Groq integration.")
+        except Exception as e:
+            raise FinanceManagerException("AI Processing", f"Unknown Error: {str(e)}", "Wait 60 seconds and try again.")
 
-    finish_reason = res.choices[0].finish_reason
-    if finish_reason in ["length", "max_tokens"]:
-        raise FinanceManagerException("AI Capacity", "Chunk truncated.", "List density too high.")
+        finish_reason = res.choices[0].finish_reason
+        if finish_reason in ["length", "max_tokens"]:
+            raise FinanceManagerException("AI Capacity", "Chunk truncated.", "List density too high.")
 
-    try:
-        # Bypass Pydantic for raw array parsing to save tokens
-        data = json.loads(res.choices[0].message.content)
-        return data.get("items", [])
-    except Exception:
-        raise FinanceManagerException("AI Parsing Fault", "Corrupted JSON array output.", "Please retry.")
+        try:
+            data = json.loads(res.choices[0].message.content)
+            return data.get("items", [])
+        except Exception:
+            raise FinanceManagerException("AI Parsing Fault", "Corrupted JSON array output.", "Please retry.")
 
 
 async def parse_expense_text(raw_text: str) -> list:
@@ -69,18 +73,17 @@ async def parse_expense_text(raw_text: str) -> list:
     current_year_str = get_ist_now().strftime("%Y")
     clean_text = preprocess_financial_text(raw_text)
 
-    # CRITICAL FIX: Extreme token compression prompt. Returns raw arrays instead of objects.
     sys_prompt = (
         "Extract financial data into a compressed JSON array of arrays EXACTLY matching this format: "
         "{\"items\": [[amount(float), \"item_name\", \"date_str\" or \"\", \"category\", \"subcategory\", \"remarks\", \"Income\"|\"Expense\", \"payment_method\", \"frequency\", adjust_weekends(bool)]]}. "
         f"TODAY: {current_date_str}, YEAR: {current_year_str}. "
-        "RULES: Exact amounts only. DO NOT output JSON keys, only the array values in the exact order specified above. Use empty strings for missing text data."
+        "RULES: Exact amounts only. DO NOT output JSON keys, only the array values in the exact order specified above."
     )
 
     lines = [line.strip() for line in clean_text.split('\n') if line.strip() and re.search(r'\d', line)]
 
-    # Bundle into chunks of 30 items. (30 items * 15 tokens = ~450 output tokens, safely under the 800 limit)
-    CHUNK_SIZE = 30
+    # Bundle into highly safe chunks of 15 items to guarantee JSON validation completes
+    CHUNK_SIZE = 15
     chunks = []
     for i in range(0, len(lines), CHUNK_SIZE):
         chunks.append("\n".join(lines[i:i + CHUNK_SIZE]))
@@ -88,7 +91,6 @@ async def parse_expense_text(raw_text: str) -> list:
     if not chunks:
         chunks = [clean_text]
 
-    # Execute all chunks against the Groq API concurrently
     tasks = [_process_chunk(chunk, sys_prompt) for chunk in chunks]
     chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -101,7 +103,6 @@ async def parse_expense_text(raw_text: str) -> list:
     results = []
 
     for ext in all_extracted_arrays:
-        # Safety pad the array in case the AI missed a column
         while len(ext) < 10:
             ext.append(False if len(ext) == 9 else "")
 
