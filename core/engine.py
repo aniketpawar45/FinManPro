@@ -29,7 +29,6 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 
 def preprocess_financial_text(text: str) -> str:
     """Safely handles localized currency math without colliding with units of measurement (Litres, Kg, Meters)."""
-    # 1. Full words (Lakhs, Thousands, Crores) - Spaces allowed
     text = re.sub(r'([\d\.]+)\s*(?:crores?|cr)\b', lambda m: str(int(round(float(m.group(1)) * 10000000))), text,
                   flags=re.IGNORECASE)
     text = re.sub(r'([\d\.]+)\s*(?:lakhs?)\b', lambda m: str(int(round(float(m.group(1)) * 100000))), text,
@@ -37,7 +36,6 @@ def preprocess_financial_text(text: str) -> str:
     text = re.sub(r'([\d\.]+)\s*(?:thousands?)\b', lambda m: str(int(round(float(m.group(1)) * 1000))), text,
                   flags=re.IGNORECASE)
 
-    # 2. Shorthand (k, l) - NO SPACES ALLOWED to prevent metric collisions (e.g., "2 L" = Litres, "2L" = Lakhs)
     text = re.sub(r'([\d\.]+)(l)\b', lambda m: str(int(round(float(m.group(1)) * 100000))), text, flags=re.IGNORECASE)
     text = re.sub(r'([\d\.]+)(k)\b', lambda m: str(int(round(float(m.group(1)) * 1000))), text, flags=re.IGNORECASE)
 
@@ -52,7 +50,7 @@ async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
                 model="llama-3.1-8b-instant",
                 response_format={"type": "json_object"},
                 temperature=0.0,
-                max_tokens=500  # Tuned strictly to prevent JSON 400 errors while avoiding 429 TPM limits
+                max_tokens=500
             )
         except APIStatusError as e:
             if e.status_code == 429:
@@ -66,8 +64,6 @@ async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
             raise FinanceManagerException("AI Capacity", "Chunk truncated.", "List density too high.")
 
         raw_json = res.choices[0].message.content
-
-        # Strip LLM-generated trailing commas before parsing to avoid python JSONDecodeError
         sanitized_json = re.sub(r',\s*([\]}])', r'\1', raw_json)
 
         try:
@@ -86,11 +82,12 @@ async def parse_expense_text(raw_text: str) -> list:
     current_year_str = get_ist_now().strftime("%Y")
     clean_text = preprocess_financial_text(raw_text)
 
+    # CRITICAL FIX: Explicitly instructing the AI to isolate the final price and ignore quantities
     sys_prompt = (
         "Extract financial data into a compressed JSON array of arrays EXACTLY matching this format: "
         "{\"items\": [[amount(float), \"item_name\", \"date_str\" or \"\", \"category\", \"subcategory\", \"remarks\", \"Income\"|\"Expense\", \"payment_method\", \"frequency\", adjust_weekends(bool)]]}. "
         f"TODAY: {current_date_str}, YEAR: {current_year_str}. "
-        "RULES: Exact amounts only. DO NOT output JSON keys inside the arrays. NO TRAILING COMMAS allowed."
+        "RULES: 1. Extract ONLY the final price. Ignore quantities (e.g., 'Item - 2 - 250' -> amount is 250). 2. DO NOT output JSON keys inside arrays. 3. NO TRAILING COMMAS allowed."
     )
 
     lines = [line.strip() for line in clean_text.split('\n') if line.strip() and re.search(r'\d', line)]
@@ -103,9 +100,6 @@ async def parse_expense_text(raw_text: str) -> list:
     if not chunks:
         chunks = [clean_text]
 
-    # THE HARD CUTOFF: Vercel + Free Tier LLM Protection
-    # 8 chunks * 500 max_tokens = 4000 output tokens + ~1000 input tokens = 5000 TPM (Safe).
-    # Anything higher than 8 chunks risks hitting the 6000 TPM limit and crashing.
     if len(chunks) > 8:
         raise FinanceManagerException(
             "List Too Massive",
