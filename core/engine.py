@@ -13,7 +13,6 @@ from core.utils import get_ist_now, FinanceManagerException, IST_TZ
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-# CRITICAL FIX: Throttle concurrency to max 3 simultaneous requests to protect Groq TPM Limits
 api_semaphore = asyncio.Semaphore(3)
 
 
@@ -28,7 +27,6 @@ async def transcribe_audio(audio_bytes: bytes) -> str:
 
 
 def preprocess_financial_text(text: str) -> str:
-    """Safely handles localized currency math before the LLM sees it."""
     text = re.sub(r'([\d\.]+)\s*(?:lakhs?|l)\b', lambda m: str(int(round(float(m.group(1)) * 100000))), text,
                   flags=re.IGNORECASE)
     text = re.sub(r'([\d\.]+)\s*(?:k|thousands?)\b', lambda m: str(int(round(float(m.group(1)) * 1000))), text,
@@ -37,7 +35,6 @@ def preprocess_financial_text(text: str) -> str:
 
 
 async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
-    """Helper method to process chunks with semaphore throttling and array compression."""
     async with api_semaphore:
         try:
             res = await client.chat.completions.create(
@@ -45,12 +42,12 @@ async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
                 model="llama-3.1-8b-instant",
                 response_format={"type": "json_object"},
                 temperature=0.0,
-                max_tokens=1200  # Increased to ensure JSON validates, protected by Semaphore
+                max_tokens=1200
             )
         except APIStatusError as e:
             if e.status_code == 429:
                 raise FinanceManagerException("AI Rate Limit", "Groq Free Tier TPM Limit reached.",
-                                              "Please wait 60 seconds and try again.")
+                                              "Wait 60 seconds and try again.")
             raise FinanceManagerException("AI Processing", f"API Error: {str(e)}", "Check Groq integration.")
         except Exception as e:
             raise FinanceManagerException("AI Processing", f"Unknown Error: {str(e)}", "Wait 60 seconds and try again.")
@@ -59,11 +56,19 @@ async def _process_chunk(chunk_text: str, sys_prompt: str) -> list:
         if finish_reason in ["length", "max_tokens"]:
             raise FinanceManagerException("AI Capacity", "Chunk truncated.", "List density too high.")
 
+        raw_json = res.choices[0].message.content
+
+        # CRITICAL FIX: Regex sanitization to strip LLM-generated trailing commas before parsing
+        sanitized_json = re.sub(r',\s*([\]}])', r'\1', raw_json)
+
         try:
-            data = json.loads(res.choices[0].message.content)
+            data = json.loads(sanitized_json)
             return data.get("items", [])
-        except Exception:
-            raise FinanceManagerException("AI Parsing Fault", "Corrupted JSON array output.", "Please retry.")
+        except json.JSONDecodeError as e:
+            # Expose the broken string in the UI if it fails again
+            snippet = raw_json.strip()[:100].replace('\n', ' ')
+            raise FinanceManagerException("AI Parsing Fault", f"Invalid JSON syntax: {str(e)}",
+                                          f"Output snippet: {snippet}...")
 
 
 async def parse_expense_text(raw_text: str) -> list:
@@ -73,16 +78,16 @@ async def parse_expense_text(raw_text: str) -> list:
     current_year_str = get_ist_now().strftime("%Y")
     clean_text = preprocess_financial_text(raw_text)
 
+    # CRITICAL FIX: Explicitly forbidding trailing commas in the prompt
     sys_prompt = (
         "Extract financial data into a compressed JSON array of arrays EXACTLY matching this format: "
         "{\"items\": [[amount(float), \"item_name\", \"date_str\" or \"\", \"category\", \"subcategory\", \"remarks\", \"Income\"|\"Expense\", \"payment_method\", \"frequency\", adjust_weekends(bool)]]}. "
         f"TODAY: {current_date_str}, YEAR: {current_year_str}. "
-        "RULES: Exact amounts only. DO NOT output JSON keys, only the array values in the exact order specified above."
+        "RULES: Exact amounts only. DO NOT output JSON keys inside the arrays. NO TRAILING COMMAS allowed."
     )
 
     lines = [line.strip() for line in clean_text.split('\n') if line.strip() and re.search(r'\d', line)]
 
-    # Bundle into highly safe chunks of 15 items to guarantee JSON validation completes
     CHUNK_SIZE = 15
     chunks = []
     for i in range(0, len(lines), CHUNK_SIZE):
